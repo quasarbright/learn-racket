@@ -14,22 +14,20 @@
 
 (define (prepend-env xs es env) (foldr cons-env env xs es))
 
-(define builtins `((* ,*) (+ ,+) (equal? ,equal?)))
+(define builtins '(* + equal?))
 
-(define (lookup-builtin x) (let ((v (assoc x builtins))) (if v (second v) v))) 
+(define (lookup-builtin x) (let ((v (member x builtins))) (if v (racket-eval (car v) ns) v))) 
 
 
 (define (eval env e)
   (let ((recur (lambda (arg) (eval env arg))))
     (match e
       [x #:when (symbol? x) (or (lookup-builtin x) (lookup-env env x))] ; var ref
-      [`(eval ,datum-expr) (recur (recur datum-expr))] ; evaluate the value of datum-expr as a datum
       [`(,(or 'lambda 'λ) (,argnames ...) ,body) e] ; lambda (need this case to prevent it being recognized as application)
-      [`(let ((,xs ,es) ...) ,body) (eval (prepend-env xs es env) body)] ; let binding(s) TODO no dups
+      [`(let ((,xs ,es) ...) ,body) (eval (prepend-env xs es env) body)] ; let binding(s)
       [`(if ,cnd ,thn ,els) (if (recur cnd) (recur thn) (recur els))] ; if
       [`(quote ,datum) datum] ; quote
-      [`(quasiquote ,datum) (eval-quasi env 1 datum)] ; quasi quote (escapable with unquote)
-      [(list 'unquote _) (error "unquote used outside of a quasi quote")]
+      [`(quasiquote ,datum) (eval-quasi env 1 datum)] ; quasi (escapable) quote
       [(list f args ...) (app env (recur f) (map recur args))] ; application
       [_ e] ; literal
       )))
@@ -87,15 +85,3 @@
 (teval '(let ((x 2)) `(`,(,x))))
 (teval '`(1 `,(+ 1 ,(+ 2 3)) 4)) ; stolen from racket quasiquoting docs
 (teval '`(,1 2 3)) ; stolen from racket docs
-(teval '2)
-(teval `2)
-(check-exn (lambda (val) (string=? (exn-message val) "unquote used outside of a quasi quote")) (thunk (eval empty-env '(unquote x))))
-(check-equal? (eval empty-env '(eval 2)) 2)
-(check-equal? (eval empty-env '(eval 2)) 2)
-(check-equal? (eval empty-env '(eval '(+ 2 2))) 4)
-(check-equal? (eval empty-env '(let ((x 2)) (eval 'x))) 2)
-(check-equal? (eval empty-env '(let ((x 2) (y 3)) (+ 1 (eval '(+ x y))))) 6)
-(check-equal? (eval empty-env '(let ((plus1 (lambda (stx) `(+ 1 ,stx)))) (eval (plus1 2)))) 3)
-(check-equal? (eval empty-env '(let ((x 2) (plus1 (lambda (stx) `(+ 1 ,stx)))) (eval (plus1 x)))) 3)
-(check-equal? (eval empty-env '(let ((plus1 (lambda (stx) `(+ 1 ,stx))) (x 2)) (eval (plus1 x)))) 3)
-(check-equal? (eval empty-env '(let ((plus1 (lambda (stx) `(+ 1 ,stx x))) (x 2)) (eval (plus1 x)))) 5) ; the macro outputs a reference to x. dynamic scope
