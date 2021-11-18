@@ -27,6 +27,7 @@
 (define (make-simple-promise thnk)
   (simple-promise thnk #f #f))
 
+;; Create a promise which evaluates to the last expression in body when forced
 (define-syntax-rule (delay body ...)
   (make-simple-promise (lambda () body ...)))
 
@@ -43,6 +44,8 @@
 ;; In order to be tail recursive, if we our result is a promise, we grab its thunk, evaluate it,
 ;; set the inner promise's result to this promise, and repeat????
 
+;; Force a composable promise, forcing other composable promises inside of it as well
+;; Forces and flattens the whole chain tail recursively
 (define (composable-force p)
   (define result (naive-force p))
   (cond
@@ -62,6 +65,7 @@
 
 (define (make-composable-promise thnk) (composable-promise thnk #f #f))
 
+;; Creates a composable promise that evaluates to the last expression in body when forced
 (define-syntax-rule (lazy body ...)
   (make-composable-promise (lambda () body ...)))
 
