@@ -39,10 +39,12 @@
    (define (promise-forced? p) (simple-promise-forced? p))
    (define (force p)
      (composable-force p))])
-;; A promise which collapses a chain of promises
-;; If the result evaluates to a promise, force that promise too and store that instead
-;; In order to be tail recursive, if we our result is a promise, we grab its thunk, evaluate it,
-;; set the inner promise's result to this promise, and repeat????
+;; A promise which tail-recursively collapses a chain of promises
+;; If we end up with P1 -> P2 -> P3 -> ? (P3 isn't forced),
+;; we swap the pointers and get P2 -> P1 -> P3 -> ?
+;; Then, we repeat the process on P1 until it ends up pointing to a non-promise
+;; In the end, we get T2 -> T1, T3 -> T1, ... T1 -> result, Tn -> result
+;; The chain is flattened
 
 ;; Force a composable promise, forcing other composable promises inside of it as well
 ;; Forces and flattens the whole chain tail recursively
@@ -51,9 +53,9 @@
   (cond
     [(composable-promise? result) (define inner-promise result)
                                   (define inner-result (naive-force result))
-                                  (set-simple-promise-result! p inner-result) ; can't say set-composable... ??
+                                  (set-simple-promise-result! p inner-result)
                                   (if (composable-promise? inner-result)
-                                      (begin (set-simple-promise-result! inner-promise p) ; flip the pointers
+                                      (begin (set-simple-promise-result! inner-promise p) ; swap the pointers
                                              ; was p1 -> p2 -> p3
                                              ; now it's p2 -> p1 -> p3
                                              ; repeat to collapse p1 -> p3
