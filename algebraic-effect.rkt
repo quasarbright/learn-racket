@@ -9,15 +9,17 @@
 (module+ test (require rackunit))
 
 #|
+Algebraic effects:
+
+It's like an exception, but you can resume from it with a value.
+However, it's more powerful than that.
+You have first-class access to the `resume-with` function, which opens up many possibilities.
 
 The two essential forms are `perform` and `with-effect-handlers`.
 Example:
 > (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
     (* 3 (perform 4)))
 15
-
-It's like an exception, but you can resume from it with a value.
-However, it's more powerful than that.
 
 You can also get non-determinism:
 > (with-effect-handlers ([number? (λ (n resume-with) (list (resume-with (add1 n)) (resume-with (+ 2 n))))])
@@ -29,22 +31,45 @@ Async:
            (perform 1)))
 2
 
-I don't think multiple performs and multiple resumes makes sense. If you have multiple performs,
-thinking about the evaluation in terms of (resume-with v) returning the result of the resumed body
-might not even make sense, since that will involve another handling. Which one should be the result
-of the whole thing? It doesn't make sense.
+Generators:
+> (with-effect-handlers ([(const #t) (λ (v resume-with) (cons v (resume-with (void))))])
+    (perform 1)
+    (perform 2)
+    (if #t
+        (perform 3)
+        (perform 'foo))
+    (perform 4)
+    '())
+'(1 2 3 4))
 
-Maybe it does make sense. calling resume-with in the handler runs the rest of the body with that value
-filled in for the hole. This may include other performs. In that case, you'd end up coming back to the
-handler, and resuming. So you have to consider how the code will come back to the handler. This control
-flow is pretty confusing. It's kind of like foldr since the whole thing evaluates to the handling of the
-first perform, but 
+Here is a rough description of the semantics:
+(with-effect-handlers ([pred (λ (v resume-with) handle-expr)])
+  body-expr)
+Assume there is not another with-handlers in body-expr
+If a `(perform v)` is evaluated in the body, and `(pred v)` is true,
+the entire computation evaluates to applying the handler to `v` and `resume-with`.
+`resume-with` is a continuation that, when called `(resume-with u)`, will resume
+computation in the body with the `(perform v)` replaced by `u`.
+If there is no `(perform v)` in body-expr, the entire computation evaluates to the result of body-expr.
+In the case of multiple handlers on the same level, the first one with a passing predicate is used.
+If an effect is performed and no handler predicates pass, the effect is handled by an outer handler, if
+one exists. If one doesn't exist, an exn:fail:algebraic-effects:unhandled is raised. This behavior
+is similar to exceptions and `with-handlers`.
 
+Things get tricky when you deal with multiple performs in the body.
+You have to keep in mind that resuming will involve returning to your handler upon subsequent effects.
+This makes it like writing a recursive function, and it's tricky to think about. The control flow is confusing.
+
+The async example would be tricky with multiple performs. Resuming might result in a future, and it might result in
+the final answer. You'd have to handle both cases in the handler. And what if the body results in a future? Would you
+do some sort of tagging to distinguish? Sounds like a monad. I could automate the tagging in the library though.
 |#
 
 ;; Perform an algebraic effect
 (define (perform eff)
-  (shift k (raise (effect eff k))))
+  (if (continuation-prompt-available? algebraic-effects-prompt-tag)
+      (control-at algebraic-effects-prompt-tag k (raise (effect eff k)))
+      (raise (exn:fail:algebraic-effects:unhandled (format "Unhandled effect: ~v" eff) (current-continuation-marks)))))
 
 ;; Handle algebraic effects
 #;(with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
@@ -55,18 +80,22 @@ first perform, but
 ;; A [Handler E] is a [E [Any -> Any] -> Any]
 ;; Represents an effect handler a user would write where E is the effect type
 ;; Example:
-(define add1-resume (λ (n resume-with) (resume-with (add1 n)))) ; [Handler Number]
+#; [Handler Number]
+(define add1-resume (λ (n resume-with) (resume-with (add1 n))))
+
+#; [Handler Any]
+; Just resumes with the result of performing the effect. This allows
+; passthrough to an outer handler, but retains this handler.
+(define re-perform-handler (λ (e resume-with) (resume-with (perform e))))
 
 #; { [Listof [Any -> Boolean]] [Listof [Handler Any]] -> Any }
 (define (call-with-effect-handling predicates handlers thnk)
-  #; [Handler Any]
-  ; Just resumes with the result of performing the effect. This allows
-  ; passthrough to an outer handler, but retains this handler.
-  (define re-perform-handler (λ (e resume-with) (resume-with (perform e))))
   #; { [Effect Any] -> Any }
-  ; Searches for a handler among the arguments and applies it if its predicate
-  ; passes. Otherwise, re-perform the effect
-  (define (main-handler e)
+  ; Searches for a Handler among the `handlers` and applies it if its predicate
+  ; passes. Otherwise, re-perform the effect.
+  ; This is an "exception" handler, not an "effect" handler like a user would write.
+  ; This strangeness is a result of using `raise` to raise an effect struct.
+  (define (exception-handler e)
     (define eff (effect-eff e))
     (define resume-with (effect-cont e))
     ; find a handler whose predicate passes
@@ -75,11 +104,12 @@ first perform, but
                [handler handlers])
         (and (pred eff) handler)))
     (define handler (or maybe-handler re-perform-handler))
+    ; we need this recursive call to re-delimit the continuation upon resuming
     (handler eff (λ (v) (call-with-effect-handling predicates
                                                    handlers
-                                                   (thunk (reset (resume-with v)))))))
-  (with-handlers ([effect? main-handler])
-    (reset (thnk))))
+                                                   (thunk (prompt-at algebraic-effects-prompt-tag (resume-with v)))))))
+  (with-handlers ([effect? exception-handler])
+    (prompt-at algebraic-effects-prompt-tag (thnk))))
 
 (struct effect (eff cont) #:transparent)
 ;; An [Effect A] is an (effect A Continuation)
@@ -87,6 +117,9 @@ first perform, but
 ;; eff is the value passed to `perform`
 ;; cont is the continuation which, when applied to an argument `v`, resumes the computation at the
 ;; performance site with the `perform` form replaced by `v`
+
+(struct exn:fail:algebraic-effects exn:fail () #:transparent)
+(struct exn:fail:algebraic-effects:unhandled  exn:fail:algebraic-effects () #:transparent)
 
 #; { (Any -> Boolean) -> (Any -> Boolean) }
 ;; Lifts a predicate on values to a predicate on effects containing those values
@@ -96,6 +129,9 @@ first perform, but
   (check-true ((effect-predicate number?) (effect 1 #f)))
   (check-false ((effect-predicate number?) (effect 'foo #f)))
   (check-false ((effect-predicate number?) 'foo)))
+
+; a custom prompt tag used to avoid collision with user reset shifts
+(define algebraic-effects-prompt-tag (make-continuation-prompt-tag 'algebraic-effects-prompt-tag))
 
 
 ;; Test programs
@@ -109,8 +145,8 @@ first perform, but
                  ; I think it loses the handler the second time around
                  (list (perform 1) (perform 4)))
                '(2 5))
-  #;(test-exn "unhandled effect"
-            effect?
+  (test-exn "unhandled effect"
+            exn:fail:algebraic-effects:unhandled?
             (thunk (with-effect-handlers ([number? (λ (n resume-with) (resume-with n))])
                      (perform 'foo))))
   (test-equal? "ignored effect"
@@ -147,6 +183,10 @@ first perform, but
                (reset (+ 99 (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
                               (shift k 1))))
                1)
+  (test-equal? "can use reset control around the whole computation"
+               (reset (+ 99 (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                              (control k 1))))
+               1)
   (test-equal? "use escaped resume-with"
                (let-values ([(n resume-with) (with-effect-handlers ([number? values])
                                                (* 3 (perform 4)))])
@@ -172,6 +212,10 @@ first perform, but
                  (with-effect-handlers ([symbol? (λ (s resume-with) (resume-with s))])
                    (* 2 (perform 4))))
                10)
+  (test-equal? "nested perform"
+               (with-effect-handlers ([number? add1-resume])
+                 (perform (perform 1)))
+               3)
   (test-case "escaped resume-with retains handlers"
              (define-values (n resume-with) (with-effect-handlers ([number? values])
                                               (* (perform 3) (perform 4))))
@@ -188,5 +232,13 @@ first perform, but
                  (with-effect-handlers ([number? (λ (n resume-with) (resume-with (perform (add1 n))))])
                    (list (perform 2) (perform 9))))
                (list 4 11))
-  #;(test-equal "generator"
-                (with-effect-handlers ())))
+  (test-equal? "generator"
+               (with-effect-handlers ([(const #t) (λ (v resume-with) (cons v (resume-with (void))))])
+                 (perform 1)
+                 (perform 2)
+                 (if #t
+                     (perform 3)
+                     (perform 'foo))
+                 (perform 4)
+                 '())
+               '(1 2 3 4)))
