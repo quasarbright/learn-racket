@@ -59,24 +59,25 @@ first perform, but
 
 #; { [Listof [Any -> Boolean]] [Listof [Handler Any]] -> Any }
 (define (call-with-effect-handling predicates handlers thnk)
+  #; [Handler Any]
+  ; Just resumes with the result of performing the effect. This allows
+  ; passthrough to an outer handler, but retains this handler.
+  (define re-perform-handler (λ (e resume-with) (resume-with (perform e))))
   #; { [Effect Any] -> Any }
   ; Searches for a handler among the arguments and applies it if its predicate
-  ; passes. Otherwise, re-raise the effect
+  ; passes. Otherwise, re-perform the effect
   (define (main-handler e)
     (define eff (effect-eff e))
     (define resume-with (effect-cont e))
     ; find a handler whose predicate passes
-    (define handler
+    (define maybe-handler
       (for/or ([pred predicates]
                [handler handlers])
         (and (pred eff) handler)))
-    (if handler
-        ; TODO reset and recursive call. reset inside
-        (handler eff (λ (v) (call-with-effect-handling predicates
-                                   handlers
-                                   (thunk (reset (resume-with v))))))
-        ; none of the predicates passed
-        (raise e)))
+    (define handler (or maybe-handler re-perform-handler))
+    (handler eff (λ (v) (call-with-effect-handling predicates
+                                                   handlers
+                                                   (thunk (reset (resume-with v)))))))
   (with-handlers ([effect? main-handler])
     (reset (thnk))))
 
@@ -108,7 +109,7 @@ first perform, but
                  ; I think it loses the handler the second time around
                  (list (perform 1) (perform 4)))
                '(2 5))
-  (test-exn "unhandled effect"
+  #;(test-exn "unhandled effect"
             effect?
             (thunk (with-effect-handlers ([number? (λ (n resume-with) (resume-with n))])
                      (perform 'foo))))
@@ -137,4 +138,55 @@ first perform, but
   (test-equal? "async"
                (touch (with-effect-handlers ([number? (λ (n resume-with) (future (thunk (resume-with (add1 n)))))])
                         (perform 1)))
-               2))
+               2)
+  (test-equal? "can use reset shift in body"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (reset (shift k (k (perform 1)))))
+               2)
+  (test-equal? "can use reset shift around the whole computation"
+               (reset (+ 99 (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                              (shift k 1))))
+               1)
+  (test-equal? "use escaped resume-with"
+               (let-values ([(n resume-with) (with-effect-handlers ([number? values])
+                                               (* 3 (perform 4)))])
+                 (resume-with (add1 n)))
+               15)
+  (test-equal? "use escaped resume-with twice"
+               (let-values ([(n resume-with) (with-effect-handlers ([number? values])
+                                               (* 3 (perform 4)))])
+                 (+ (resume-with (sub1 n)) (resume-with (add1 n))))
+               24)
+  (test-equal? "re-perform effect without inner resume"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (with-effect-handlers ([number? (λ (n resume-with) (perform (add1 n)))])
+                   (* 2 (perform 3))))
+               5)
+  (test-equal? "re-perform effect with inner resume"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (with-effect-handlers ([number? (λ (n resume-with) (resume-with (perform (add1 n))))])
+                   (* 2 (perform 3))))
+               10)
+  (test-equal? "effect pass-through"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (with-effect-handlers ([symbol? (λ (s resume-with) (resume-with s))])
+                   (* 2 (perform 4))))
+               10)
+  (test-case "escaped resume-with retains handlers"
+             (define-values (n resume-with) (with-effect-handlers ([number? values])
+                                              (* (perform 3) (perform 4))))
+             (define-values (n2 resume-with2) (resume-with 2))
+             (define result (resume-with2 5))
+             (check-equal? (list n n2 result) (list 3 4 10)))
+  (test-equal? "handlers are retained after effect pass-through"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (with-effect-handlers ([symbol? (λ (s resume-with) (resume-with s))])
+                   (list (perform 2) (perform 'foo))))
+               (list 3 'foo))
+  (test-equal? "handlers are retained after re-performing"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (with-effect-handlers ([number? (λ (n resume-with) (resume-with (perform (add1 n))))])
+                   (list (perform 2) (perform 9))))
+               (list 4 11))
+  #;(test-equal "generator"
+                (with-effect-handlers ())))
