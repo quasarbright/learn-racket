@@ -43,16 +43,42 @@ first perform, but
 |#
 
 ;; Perform an algebraic effect
-(define-syntax-rule (perform eff)
+(define (perform eff)
   (shift k (raise (effect eff k))))
 
 ;; Handle algebraic effects
 #;(with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
     (* 3 (perform 4))) ; results in 15
 (define-syntax-rule (with-effect-handlers ([pred handler] ...) body ...)
-  (with-handlers ([(effect-predicate pred) (λ (e) (reset (handler (effect-eff e) (effect-cont e))))]
-                  ...)
-    (reset body ...)))
+  (call-with-effect-handling (list pred ...) (list handler ...) (thunk body ...)))
+
+;; A [Handler E] is a [E [Any -> Any] -> Any]
+;; Represents an effect handler a user would write where E is the effect type
+;; Example:
+(define add1-resume (λ (n resume-with) (resume-with (add1 n)))) ; [Handler Number]
+
+#; { [Listof [Any -> Boolean]] [Listof [Handler Any]] -> Any }
+(define (call-with-effect-handling predicates handlers thnk)
+  #; { [Effect Any] -> Any }
+  ; Searches for a handler among the arguments and applies it if its predicate
+  ; passes. Otherwise, re-raise the effect
+  (define (main-handler e)
+    (define eff (effect-eff e))
+    (define resume-with (effect-cont e))
+    ; find a handler whose predicate passes
+    (define handler
+      (for/or ([pred predicates]
+               [handler handlers])
+        (and (pred eff) handler)))
+    (if handler
+        ; TODO reset and recursive call. reset inside
+        (handler eff (λ (v) (call-with-effect-handling predicates
+                                   handlers
+                                   (thunk (reset (resume-with v))))))
+        ; none of the predicates passed
+        (raise e)))
+  (with-handlers ([effect? main-handler])
+    (reset (thnk))))
 
 (struct effect (eff cont) #:transparent)
 ;; An [Effect A] is an (effect A Continuation)
@@ -106,8 +132,8 @@ first perform, but
   (test-equal? "non-determinism with two performs"
                (with-effect-handlers ([number? (λ (n resume-with) (list (resume-with (add1 n)) (resume-with (+ 2 n))))])
                  (list (perform 5) (perform 1)))
-               '(((5 2) (5 3))
-                 ((6 2) (6 3))))
+               '(((6 2) (6 3))
+                 ((7 2) (7 3))))
   (test-equal? "async"
                (touch (with-effect-handlers ([number? (λ (n resume-with) (future (thunk (resume-with (add1 n)))))])
                         (perform 1)))
