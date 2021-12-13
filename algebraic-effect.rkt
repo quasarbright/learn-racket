@@ -177,8 +177,12 @@ do some sort of tagging to distinguish? Sounds like a monad. I could automate th
                2)
   (test-equal? "can use reset shift in body"
                (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
-                 (reset (shift k (k (perform 1)))))
+                 (reset (+ 3 (shift k (perform 1)))))
                2)
+  (test-equal? "can use prompt control in body"
+               (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
+                 (prompt (+ 3 (shift k (k (k (perform 1)))))))
+               8)
   (test-equal? "can use reset shift around the whole computation"
                (reset (+ 99 (with-effect-handlers ([number? (λ (n resume-with) (resume-with (add1 n)))])
                               (shift k 1))))
@@ -241,4 +245,19 @@ do some sort of tagging to distinguish? Sounds like a monad. I could automate th
                      (perform 'foo))
                  (perform 4)
                  '())
-               '(1 2 3 4)))
+               '(1 2 3 4))
+  ; I thought this would fail, but you control with raise,
+  ; so the prompt is replaced with the raise, which aborts the body
+  (test-equal? "users can't catch effects"
+               (with-effect-handlers ([number? add1-resume])
+                 (with-handlers ([(const #t) (const 'oopsie)])
+                   (perform 3)))
+               4)
+  (test-exn "exceptions propagate through the effect handler"
+            exn:fail?
+            (thunk (with-effect-handlers ([number? add1-resume])
+                     (error "poof"))))
+  (test-exn "exceptions propagate through effect handler after perform"
+            exn:fail?
+            (thunk (with-effect-handlers ([number? add1-resume])
+                     (+ (perform 1) (error "uh oh"))))))
