@@ -82,7 +82,7 @@
   (syntax-parser
     [(_ val:id pat on-success:expr on-fail:expr)
      (syntax-parse #'pat
-       #:datum-literals (quote cons)
+       #:datum-literals (quote cons or)
        [var:id
         #'(let ([var val]) on-success)]
        [(quote datum)
@@ -95,7 +95,10 @@
         #'(if (cons? val)
               (let ([first-pv (first val)] [rest-pv (rest val)])
                 (minimatch* first-pv first-pat (minimatch* rest-pv rest-pat on-success on-fail) on-fail))
-              on-fail)])]))
+              on-fail)]
+       [(or pat1 pat2)
+        ; assume same bindings
+        #'(minimatch* val pat1 on-success (minimatch* val pat2 on-success on-fail))])]))
 
 (module+ test
   (check-equal? (minimatch 4 [x (list x x)])
@@ -129,7 +132,11 @@
                                          [(cons a (cons b (quote 4))) 5]
                                          [(cons a (cons b (quote 4))) 5]
                                          [(cons a (cons b (quote 4))) 5]
-                                         [(cons a (cons b (quote 4))) 5]))))
+                                         [(cons a (cons b (quote 4))) 5])))
+  (check-equal? (minimatch (list 1 2) [(or (cons a (cons b '())) (cons '42 (cons a (cons b '())))) (list a b)])
+                (list 1 2))
+  (check-equal? (minimatch (list 1 2) [(or (cons '42 (cons a (cons b '()))) (cons a (cons b '()))) (list a b)])
+                (list 1 2)))
 
 
 
