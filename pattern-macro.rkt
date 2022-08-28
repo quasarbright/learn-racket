@@ -78,6 +78,11 @@ Hygiene should be taken care of by define-syntax. This just needs to be a pure p
      (let ([pats (attribute pat)]
            [targets (syntax->list target)])
        (and targets
+            (let-values ([(subs targets)
+                          (match-list-pattern literals targets pats)])
+              (and (null? targets)
+                   subs))
+            #;#;
             (= (length pats) (length targets))
             (let ([subss (for/list ([pattern pats] [target targets])
                            (match-pattern literals target pattern))])
@@ -99,6 +104,53 @@ Hygiene should be taken care of by define-syntax. This just needs to be a pure p
              [vars (map first first-subs)])
         (for/list ([var vars])
           (list var (map (λ (subs) (lookup var subs)) subss))))))
+
+#;(-> (listof syntax?) (listof syntax?) (listof syntax?) (values (maybe/c substitution?) (listof syntax?)))
+; matches the patterns against the targets
+; returns a substition or #f on failure, and the updated targets stream
+(define (match-list-pattern literals targets patterns)
+  (syntax-parse patterns
+    [(pat (~datum ooo) patterns ...)
+     (let-values ([(subs targets) (match-pattern-many literals targets #'pat)])
+       (if subs
+           (let-values ([(subs* target) (match-list-pattern literals targets (attribute patterns))])
+             (values (combine-subss subs subs*) target))
+           (values #f targets)))]
+    [(pat patterns ...)
+     (if (cons? targets)
+         (let ([subs (match-pattern literals (car targets) #'pat)]
+               [targets (cdr targets)])
+           (if subs
+               (let-values ([(subs* targets) (match-list-pattern literals targets (attribute patterns))])
+                 (if subs*
+                     (values (combine-subss subs subs*) targets)
+                     (values #f targets)))
+               (values #f targets)))
+         (values #f targets))]
+    [()
+     (if (null? targets)
+         (values '() targets)
+         (values #f targets))]))
+
+#;(-> (listof syntax?) (listof syntax?) syntax? (values substitition? (listof syntax?)))
+; matches a pattern zero or more times until it fails
+; returns a substitition and the updated targets stream. it never fails, so subs is never #f
+(define (match-pattern-many literals targets pattern)
+  (if (null? targets)
+      (values '() targets)
+      (let ([subs (match-pattern literals (car targets) pattern)])
+        (if subs
+            (let-values ([(subs* targets) (match-pattern-many literals (cdr targets) pattern)])
+              (values (cons-subs subs subs*) targets))
+            (values '() targets)))))
+
+#;(-> substitution? substitution? substitution?)
+; conses values in subs with corresponding values in subs*
+; assumes there are no bindings in subs* that are not in subs
+(define (cons-subs subs subs*)
+  (for/list ([pair subs])
+    (match-let ([(list var val) pair])
+      (list var (cons val (or (lookup var subs*) '()))))))
 
 #;(-> substition? syntax? (rose/c syntax?))
 ; apply the substitutions to the template
@@ -165,6 +217,7 @@ example:
 ; flattens a substition binding a variables to lists, to a list of substitutions
 (define (ungroup-subs subs template)
   (define pattern-vars (template-pattern-vars subs template))
+  ; TODO split this up if it is found to have a bug
   ; pattern-vars are from the subs. lookup expects vars from the template, but it should be fine
   (define pattern-vals (for/list ([var pattern-vars]) (lookup var subs)))
   (define list-pattern-vals (filter list? pattern-vals))
@@ -281,7 +334,7 @@ example:
             (first lengths)
             (raise-syntax-error #f "incompatible ellipsis match counts for template")))))
 
-#;(-> identifier? substition? syntax?)
+#;(-> identifier? substition? (maybe/c syntax?))
 ; look up the variable in the substitution
 (define (lookup v subs)
   (match subs
