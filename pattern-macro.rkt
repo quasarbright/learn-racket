@@ -63,17 +63,6 @@ Hygiene should be taken care of by define-syntax. This just needs to be a pure p
      (and (equal? (syntax->datum target) (syntax->datum #'var)) '())]
     [var:id
      (list (list #'var target))]
-    ; ... is special to racket, so I'm just using ooo to get around that
-    [(pat (~datum ooo))
-     ; simplified ellipsis pattern. equivalend to (pat ...), can't be used like (pat1 pat2 ... pat3)
-     (let ([targets (syntax->list target)])
-       ; target must be a list
-       (and targets
-            ; get the substition for matching pat on each sub-target
-            (let ([subss (for/list ([target targets]) (match-pattern literals target #'pat))])
-              (and (andmap identity subss)
-                   ; if they all match, group the substitions
-                   (group-subss subss)))))]
     [(pat ...)
      (let ([pats (attribute pat)]
            [targets (syntax->list target)])
@@ -368,4 +357,15 @@ example:
                        #'(((1 2 3) (4 5 6))
                           ((7 8) (9 0))))
                       #'(((1 4) (2 5) (3 6))
-                         ((7 9) (8 0)))))
+                         ((7 9) (8 0))))
+  ; ellipsis pattern with pattern before it
+  (check-datum-equal? ((my-syntax-rules () [(a b ooo) (a (b ooo))]) #'(1 2 3 4))
+                      #'(1 (2 3 4)))
+  ; ellipsis pattern with pattern before and after it
+  (check-datum-equal? ((my-syntax-rules () [(a (b c) ooo d) (a (b ooo) (c ooo) d)])
+                       #'(1 (2 3) (4 5) 6))
+                      #'(1 (2 4) (3 5) 6))
+  ; non-greedy ellipsis
+  (check-datum-equal? ((my-syntax-rules () [(a b ooo c) (a (b ooo) c)])
+                       #'(1 2 3 4))
+                      #'(1 (2 3) 4)))
