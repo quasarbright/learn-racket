@@ -177,4 +177,50 @@ low level:
     (send-message repeater-addr 'bar)
     (define gets (build-list 6 (thunk* (address-get chan))))
     (check-equal? gets '(foo bar foo bar foo bar))
-    (send repeater-actor kill)))
+    (send repeater-actor kill))
+  (test-case "sns"
+    (struct subscriber [addr wrap])
+    ; A Subscriber is a (subscriber address? (-> any any))
+    ; where wrap transforms a message in a way that the subscriber will recognize
+
+    ; sns supports subscribing to the feed and publishing a message to all subscribers
+    (define-actor sns%
+      (field [subscribers '()])
+      (on-receive
+       (match-lambda
+         [`(publish ,msg)
+          (for ([subscriber subscribers])
+            (send-message (subscriber-addr subscriber) ((subscriber-wrap subscriber) msg)))]
+         [`(subscribe ,addr ,wrap)
+          (set! subscribers (cons (subscriber addr wrap) subscribers))])))
+    (define sns (new-actor sns%))
+    ; nobody receives this
+    (send-message sns '(publish message-for-nobody))
+    (define addr1 (make-address))
+    (define addr2 (make-address))
+    (define addr3 (make-address))
+    (send-message sns `(subscribe ,addr1 ,list))
+    (send-message sns '(publish message-for-1))
+    (send-message sns `(subscribe ,addr2 ,vector))
+    (send-message sns `(subscribe ,addr3 ,identity))
+    (send-message sns '(publish message-for-all))
+    (check-equal? (address-get addr1) '(message-for-1))
+    (check-equal? (address-get addr1) '(message-for-all))
+    (check-equal? (address-get addr2) #(message-for-all))
+    (check-equal? (address-get addr3) 'message-for-all))
+  (test-case "data store"
+    (define-actor data-store%
+      (init-field data)
+      (on-receive
+       (match-lambda
+         [`(get ,dest ,wrap) (send-message dest (wrap data))]
+         [`(put! ,new-data) (set! data new-data)]
+         [`(update! ,proc) (set! data (proc data))])))
+    (define data-store (new-actor data-store% [data 0]))
+    ; atomic updates
+    ; if you did this naively with set!, it'd fail.
+    (for/async ([_ (in-range 1000)])
+      (send-message data-store `(update! ,add1)))
+    (define addr (make-address))
+    (send-message data-store `(get ,addr ,identity))
+    (check-equal? (address-get addr) 1000)))
