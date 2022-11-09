@@ -10,7 +10,7 @@
 
 ;; dependencies ;;
 
-(require racket/control)
+(require racket/control (for-syntax syntax/parse))
 
 ;; data definitions ;;
 
@@ -22,71 +22,42 @@
 
 ;; functionality ;;
 
-; a custom prompt tag used to avoid collision with other reset shifts
-(define ae-tag (make-continuation-prompt-tag 'algebraic-effects-prompt-tag))
-
 #;(any/c continuation? -> any/c)
 ; the current handler for algebraic effects.
-; takes in an effect value and a continuation from which the effect was performs,
+; takes in an effect value and a continuation from which the effect was performed,
 ; and handles the effect in some way.
 ; The default value raises an exception that the effect is unhandled.
 (define current-effect-handler
-  (make-parameter (λ (v _) (raise (exn:fail:algebraic-effects:unhandled (format "Unhandled effect: ~v" v)
-                                                                        (current-continuation-marks))))))
+  (make-parameter (λ (v _) (raise (exn:fail:algebraic-effects:unhandled (format "Unhandled effect: ~v" v))))))
+
+(define (new-prompt-tag) (make-continuation-prompt-tag (gensym 'algebraic-effects-prompt-tag)))
+
+#;continuation-prompt-tag?
+; the default prompt tag used for effect handling.
+(define default-tag (new-prompt-tag))
 
 #;(any/c any/c)
 ; Perform an effect with the specified value.
-(define (perform value)
-  (let ([handler (current-effect-handler)])
-    (shift-at ae-tag k
+; Optionally takes in a prompt tag.
+; NOTE: this does not mean you'll use the same handler as a corresponding 'with'
+; TODO make handlers associated with prompt tags
+(define (perform value #:tag [tag #f])
+  (let ([handler (current-effect-handler)]
+        [tag (or tag default-tag)])
+    (shift-at tag k
               ; this works because you get the handler OUTSIDE of the shift
-              (handler value k)
-              #;
-              (handler value (λ (hole-filler)
-                               ; We must restore the handler before resuming.
-                               ; Otherwise, if we resume outside of the dynamic extent of the original
-                               ; parameterize (like if k escapes the with-effect-handler form),
-                               ; the handler is lost and just uses whichever one is around when you call
-                               ; the continuation.
-                               ; We perform an effect. That shifts and the delimited continuation escapes.
-                               ; This continuation escapes the parameterize's dynamic extent.
-                               ; you resume it and another effect is performed. The current effect handler
-                               ; is used, which is no longer the original one.
-                               ; this is weird but it's necessary
-                               ; I feel like there is an edge case where this restoration overrides a
-                               ; handler inappropriately.
-                               ; TODO think about it more.
-                               ; parameterize is continuation-y. That's probably why this weird behavior happens.
-                               (parameterize ([current-effect-handler handler])
-                                 (k hole-filler)))))))
-#;; TODO try this?
-[
- (with-effect-handler handler body ...)
- ~>
- (let ([handler-v handler])
-   (syntax-parameterize ([perform (make-variable-like-transformer #'(λ (value) (shift k (handler-v value k))))])
-     (reset body ...)))
- ]
+              (handler value k))))
 
-; not viable bc then you can only use perform syntactically within a with-... form
-; that makes no sense
-
-(define-syntax-rule
-  (with-effect-handler handler body ...)
-  ; I tried trampolining before I had a parameter, but it didn't work for some reason.
-  ; Maybe if the continuation escapes, the behavior is different. Or maybe I did it wrong.
-  ; Probably that. This stuff is very subtle.
-  (reset-at ae-tag
-            (parameterize ([current-effect-handler handler])
-              body ...)))
-
-#|
-If you have a generator in a generator, inner perform might break out to the outer reset.
-control might fix it. Or you could just gensym a tag for each "with" and have the tag be a parameter.
-|#
+(define-syntax with-effect-handler
+  (syntax-parser
+    [(_ handler
+        (~optional (~seq #:tag tag) #:defaults ([tag #'default-tag]))
+        body
+        ...)
+     #'(reset-at tag (parameterize ([current-effect-handler handler])
+                       body ...))]))
 
 ;; testing ;;
-
 (module+ test
   (test-case "simple add1 effect"
     (check-equal? (with-effect-handler (λ (v k) (k (add1 v)))
@@ -165,7 +136,25 @@ control might fix it. Or you could just gensym a tag for each "with" and have th
     (define-syntax-rule
       (state initial body ...)
       (with-effect-handler state-handler
-        (let ([result (let () (put initial) body ...)]) (list (get) result))))
-    (check-equal? (state 1 (get)) (list 1 1))
-    (check-equal? (state 1 (put 2) (get)) (list 2 2))
-    (check-equal? (state 1 (put 2) 3) (list 2 3))))
+        (let () (put initial) body ...)))
+    (check-equal? (state 1 (get)) 1)
+    (check-equal? (state 1 (put 2) (get)) 2)
+    (check-equal? (state 1 (put 2) 3) 3)
+    (check-equal? (state 0 (build-list 4 (thunk* (begin0 (get) (modify add1)))))
+                  '(0 1 2 3)))
+  (test-case "supply tag"
+    (define tag (new-prompt-tag))
+    (check-equal? (with-effect-handler (λ (v k) (k (add1 v)))
+                    #:tag tag
+                    (list (perform 1 #:tag tag)))
+                  '(2)))
+  #;; This fails because the handler doesn't know about tags. The inner perform use the inner handler
+  (test-case "inner perform handled by outer handler via tags"
+    (define tag-out (new-prompt-tag))
+    (define tag-in (new-prompt-tag))
+    (check-equal? (with-effect-handler (λ (v k) (k (add1 v)))
+                    #:tag tag-out
+                    (list (with-effect-handler (λ (v k) (error "boom"))
+                            #:tag tag-in
+                            (list (perform 1 #:tag tag-out)))))
+                  '((2)))))
