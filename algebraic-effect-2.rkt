@@ -20,15 +20,22 @@
 ; Represents an unhandled algebraic effect.
 ; This exception is thrown when an effect is performed, but there is no handler in scope for it.
 
+; An EffectHandler is a
+#;(any/c continuation? -> any/c)
+; Takes in an effect value and a continuation from which the ffect was performed,
+; and handles it in some way.
+
 ;; functionality ;;
 
-#;(any/c continuation? -> any/c)
-; the current handler for algebraic effects.
-; takes in an effect value and a continuation from which the effect was performed,
-; and handles the effect in some way.
-; The default value raises an exception that the effect is unhandled.
-(define current-effect-handler
-  (make-parameter (λ (v _) (raise (exn:fail:algebraic-effects:unhandled (format "Unhandled effect: ~v" v))))))
+; default effect handler just raises an exception
+(define (default-handler v _) (raise (exn:fail:algebraic-effects:unhandled (format "Unhandled effect: ~v" v))))
+
+; mapping from prompt tags to effect handlers
+(define current-effect-handlers (make-parameter (hasheq)))
+
+#;(continuation-prompt-tag? -> EffectHandler)
+; gets the current effect handler for the given prompt tag.
+(define (current-effect-handler tag) (hash-ref (current-effect-handlers) tag (λ () default-handler)))
 
 (define (new-prompt-tag) (make-continuation-prompt-tag (gensym 'algebraic-effects-prompt-tag)))
 
@@ -39,11 +46,8 @@
 #;(any/c any/c)
 ; Perform an effect with the specified value.
 ; Optionally takes in a prompt tag.
-; NOTE: this does not mean you'll use the same handler as a corresponding 'with'
-; TODO make handlers associated with prompt tags
-(define (perform value #:tag [tag #f])
-  (let ([handler (current-effect-handler)]
-        [tag (or tag default-tag)])
+(define (perform value #:tag [tag default-tag])
+  (let ([handler (current-effect-handler tag)])
     (shift-at tag k
               ; this works because you get the handler OUTSIDE of the shift
               (handler value k))))
@@ -54,7 +58,7 @@
         (~optional (~seq #:tag tag) #:defaults ([tag #'default-tag]))
         body
         ...)
-     #'(reset-at tag (parameterize ([current-effect-handler handler])
+     #'(reset-at tag (parameterize ([current-effect-handlers (hash-set (current-effect-handlers) tag handler)])
                        body ...))]))
 
 ;; testing ;;
@@ -101,43 +105,45 @@
     (check-equal? (nondet (choice 1 2)) '(1 2))
     (check-equal? (nondet (list (choice 1 2) (choice 3 4)))
                   '((1 3) (1 4) (2 3) (2 4))))
+  ; generators
+  (define gen-tag (make-continuation-prompt-tag 'generator-tag))
+  (define (yield v) (perform v #:tag gen-tag))
+  (define (yield* items) (for ([item items]) (yield item)))
+  (define (gen-handler v k)
+    (stream-cons v (k (void))))
+  (define-syntax-rule (generator body ...) (with-effect-handler gen-handler #:tag gen-tag  body ... empty-stream))
+
   (test-case "generator"
-    (define yield perform)
-    (define (yield* items) (for ([item items]) (yield item)))
-    (define (gen-handler v k)
-      (stream-cons v (k (void))))
-    (define-syntax-rule (generator body ...) (with-effect-handler gen-handler body ... empty-stream))
-    (check-equal? (stream->list (generator (yield 1)))
+        (check-equal? (stream->list (generator (yield 1)))
                   '(1))
     (check-equal? (stream->list (generator (yield 1) (yield 2)))
                   '(1 2)))
   (test-case "generator in a generator"
-    (define yield perform)
-    (define (yield* items) (for ([item items]) (yield item)))
-    (define (gen-handler v k)
-      (stream-cons v (k (void))))
-    (define-syntax-rule (generator body ...) (with-effect-handler gen-handler body ... empty-stream))
     (check-equal? (stream->list (generator (yield 1) (yield* (generator (yield 2) (yield 3)))))
                   '(1 2 3))
     (check-equal? (stream->list (generator (yield 1)
                                            (let ([inner (generator (yield 2) (yield 3))])
                                              (yield* inner))))
                   '(1 2 3)))
+  ; state
+  (define state-tag (make-continuation-prompt-tag 'state-tag))
+  (define (get) (perform 'get #:tag state-tag))
+  (define (put v) (perform (list 'put v) #:tag state-tag))
+  (define (modify f) (put (f (get))))
+  (define current-state (make-parameter 'uninitialized-state))
+  (define (state-handler v k)
+    (match v
+      ['get (k (current-state))]
+      [(list 'put new-state)
+       (parameterize ([current-state new-state]) (k (void)))]))
+  (define-syntax-rule
+    (state initial body ...)
+    (with-effect-handler state-handler
+      #:tag state-tag
+      (let () (put initial) body ...)))
+
   (test-case "state"
-    (define (get) (perform 'get))
-    (define (put v) (perform (list 'put v)))
-    (define (modify f) (put (f (get))))
-    (define current-state (make-parameter 'uninitialized-state))
-    (define (state-handler v k)
-      (match v
-        ['get (k (current-state))]
-        [(list 'put new-state)
-         (parameterize ([current-state new-state]) (k (void)))]))
-    (define-syntax-rule
-      (state initial body ...)
-      (with-effect-handler state-handler
-        (let () (put initial) body ...)))
-    (check-equal? (state 1 (get)) 1)
+        (check-equal? (state 1 (get)) 1)
     (check-equal? (state 1 (put 2) (get)) 2)
     (check-equal? (state 1 (put 2) 3) 3)
     (check-equal? (state 0 (build-list 4 (thunk* (begin0 (get) (modify add1)))))
@@ -148,7 +154,6 @@
                     #:tag tag
                     (list (perform 1 #:tag tag)))
                   '(2)))
-  #;; This fails because the handler doesn't know about tags. The inner perform use the inner handler
   (test-case "inner perform handled by outer handler via tags"
     (define tag-out (new-prompt-tag))
     (define tag-in (new-prompt-tag))
@@ -157,4 +162,7 @@
                     (list (with-effect-handler (λ (v k) (error "boom"))
                             #:tag tag-in
                             (list (perform 1 #:tag tag-out)))))
-                  '((2)))))
+                  '((2))))
+  (test-case "stateful generator"
+    (check-equal? (stream->list (generator (yield 'start) (state 0 (yield (get)) (modify add1) (yield (get))) (yield 'done)))
+                  '(start 0 1 done))))
