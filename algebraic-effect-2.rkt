@@ -6,7 +6,15 @@
 ;; module interface ;;
 
 (module+ test (require rackunit))
-(provide)
+(provide (struct-out exn:fail:algebraic-effects)
+         (struct-out exn:fail:algebraic-effects:unhandled)
+         ; parameter. Hash table from continuation prompts to effect handler procedures
+         current-effect-handlers
+         (contract-out [perform (->* (any/c) (#:tag continuation-prompt-tag?) any/c)])
+         #;(with-effect-handler handler-proc [#:tag tag-expr] body ...)
+         ; handles algebraic effects in the body
+         ; where handler-proc is an EffectHandler (see data defs)
+         with-effect-handler)
 
 ;; dependencies ;;
 
@@ -130,6 +138,7 @@
   (define (get) (perform 'get #:tag state-tag))
   (define (put v) (perform (list 'put v) #:tag state-tag))
   (define (modify f) (put (f (get))))
+  ; doesn't work with nested states but whatever
   (define current-state (make-parameter 'uninitialized-state))
   (define (state-handler v k)
     (match v
@@ -164,5 +173,10 @@
                             (list (perform 1 #:tag tag-out)))))
                   '((2))))
   (test-case "stateful generator"
-    (check-equal? (stream->list (generator (yield 'start) (state 0 (yield (get)) (modify add1) (yield (get))) (yield 'done)))
+    (check-equal? (stream->list (generator (yield 'start)
+                                           (state 0
+                                                  (yield (get))
+                                                  (modify add1)
+                                                  (yield (get)))
+                                           (yield 'done)))
                   '(start 0 1 done))))
