@@ -3,17 +3,26 @@
 ; This module implements algebraic effects via delimited continuations.
 ; Unlike the original implementation, it does not use exceptions.
 
+; it is like % and fcontrol, but when you resume, it wraps another % around E so  you can fcontrol more than once
+
 ;; module interface ;;
 
 (module+ test (require rackunit))
 (provide (struct-out exn:fail:algebraic-effects)
          (struct-out exn:fail:algebraic-effects:unhandled)
-         ; parameter. Hash table from continuation prompts to effect handler procedures
-         current-effect-handlers
-         (contract-out [perform (->* (any/c) (#:tag continuation-prompt-tag?) any/c)])
+         (contract-out
+          ; perform an effect. Like fcontrol
+          [perform (->* (any/c) (#:tag continuation-prompt-tag?) any/c)])
          #;(with-effect-handler handler-proc [#:tag tag-expr] body ...)
          ; handles algebraic effects in the body
          ; where handler-proc is an EffectHandler (see data defs)
+         ; Like %
+         #|
+         The reduction rules are (I'm pretty sure)
+         (with-effect-handler proc val) => val
+         (with-effect-handler proc E[(perform val)]) => (proc val (lambda (x) (with-effect-handler proc E[x])))
+         ; where E has no with-effect-handler
+         |#
          with-effect-handler)
 
 ;; dependencies ;;
@@ -35,16 +44,6 @@
 
 ;; functionality ;;
 
-; default effect handler just raises an exception
-(define (default-handler v _) (raise (exn:fail:algebraic-effects:unhandled (format "Unhandled effect: ~v" v))))
-
-; mapping from prompt tags to effect handlers
-(define current-effect-handlers (make-parameter (hasheq)))
-
-#;(continuation-prompt-tag? -> EffectHandler)
-; gets the current effect handler for the given prompt tag.
-(define (current-effect-handler tag) (hash-ref (current-effect-handlers) tag (λ () default-handler)))
-
 (define (new-prompt-tag) (make-continuation-prompt-tag (gensym 'algebraic-effects-prompt-tag)))
 
 #;continuation-prompt-tag?
@@ -55,10 +54,7 @@
 ; Perform an effect with the specified value.
 ; Optionally takes in a prompt tag.
 (define (perform value #:tag [tag default-tag])
-  (let ([handler (current-effect-handler tag)])
-    (shift-at tag k
-              ; this works because you get the handler OUTSIDE of the shift
-              (handler value k))))
+  (fcontrol value #:tag tag))
 
 (define-syntax with-effect-handler
   (syntax-parser
@@ -66,8 +62,15 @@
         (~optional (~seq #:tag tag) #:defaults ([tag #'default-tag]))
         body
         ...)
-     #'(reset-at tag (parameterize ([current-effect-handlers (hash-set (current-effect-handlers) tag handler)])
-                       body ...))]))
+     #'(let ([handler-v handler])
+         (define (proc v k)
+           ; need to restore the handler before resuming
+           ; need proc here, not handler-v. need the recursion
+           (let ([k (λ (v) (% (k v) proc #:tag tag))])
+             (handler-v v k)))
+         (% (let () body ...)
+            proc
+            #:tag tag))]))
 
 ;; testing ;;
 (module+ test
@@ -127,7 +130,8 @@
     (check-equal? (stream->list (generator (yield 1) (yield 2)))
                   '(1 2)))
   (test-case "generator in a generator"
-    (check-equal? (stream->list (generator (yield 1) (yield* (generator (yield 2) (yield 3)))))
+    (check-equal? (for/list ([e  (generator (yield 1) (yield* (generator (yield 2) (yield 3))))])
+                    e)
                   '(1 2 3))
     (check-equal? (stream->list (generator (yield 1)
                                            (let ([inner (generator (yield 2) (yield 3))])
