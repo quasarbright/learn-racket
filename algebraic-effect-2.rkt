@@ -78,6 +78,18 @@
     (check-equal? (with-effect-handler (λ (v k) (k (add1 v)))
                     (perform 1))
                   2))
+  (test-case "abort"
+    (define (product seq)
+      (with-effect-handler (λ (v _) v)
+        (for/fold ([acc 1])
+                  ([elem seq])
+          (if (zero? elem)
+              (perform 0)
+              (* acc elem)))))
+    (check-equal? (product '(1 2 3 4)) 24)
+    (check-equal? (product '(1 2 3 0 NaN)) 0)
+    (define s (stream-cons 2 (stream-cons 0 s)))
+    (check-equal? (product s) 0))
   (test-case "multiple performs"
     (check-equal? (with-effect-handler (λ (v k) (k (add1 v)))
                     (list (perform 1) (perform 2)))
