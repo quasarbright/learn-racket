@@ -159,23 +159,22 @@ a standard library of functions and macros
          (recur+1 (recurf add1))
          (recur-1 (recurf sub1)))
     (match expr
-      ; TODO unquote-splicing
       [(list 'unquote datum)
        (if (= level 1)
            (eval datum env)
-           (list 'unquote (recur-1 datum)))]
-      [(cons 'unquote-splicing datum)
+           (cons 'unquote (recur-1 (list datum))))]
+      [(list 'unquote-splicing datum)
        (if (= level 1)
            (error 'quasiquote "invalid context for unquote-splicing")
-           (list 'unquote-splicing (recur-1 datum)))]
-      [`(quasiquote ,datum) (list 'quasiquote (recur+1 datum))]
+           (cons 'unquote-splicing (recur-1 (list datum))))]
+      [(list 'quasiquote datum) (cons 'quasiquote (recur+1 (list datum)))]
       [(cons car-datum cdr-datum)
        (match car-datum
          [(list 'unquote-splicing datum)
           (if (= level 1)
               (append (eval datum env)
                       (recur cdr-datum))
-              (cons (list 'unquote-splicing (recur-1 datum))
+              (cons (cons 'unquote-splicing (recur-1 (list datum)))
                     (recur cdr-datum)))]
          [_ (cons (recur car-datum)
                   (recur cdr-datum))])]
