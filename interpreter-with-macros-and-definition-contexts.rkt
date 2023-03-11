@@ -194,6 +194,7 @@ lexical scope
              `(if ,(second stx)
                   (and ,@(rest (rest stx)))
                   #f))))
+
      (define-syntax or
        (lambda (stx)
          (define v (gensym))
@@ -203,11 +204,12 @@ lexical scope
                 (if v
                     v
                     (or ,@(rest (rest stx))))))))
+
      (define-syntax cond
        (lambda (stx)
          (if (null? (cdr stx))
              ; TODO errors
-             'error
+             'error-cond-all-false
              (let ()
                (define clause (car (cdr stx)))
                (define clauses (cdr (cdr stx)))
@@ -216,6 +218,7 @@ lexical scope
                `(if ,cnd
                     (let () ,@thn)
                     (cond ,@clauses))))))
+
      (define-syntax match
        (lambda (stx)
          (define target (second stx))
@@ -223,13 +226,14 @@ lexical scope
          (define target-v (gensym 'target-v))
          (if (null? clauses)
              ; TODO errors
-             'error
+             'error-match-all-failed
              ; this will introduce linear duplicate lets
              `(let ([,target-v ,target])
                 (do-match ,target-v
                           ,(first (first clauses))
                           (begin ,@(rest (first clauses)))
                           (match ,target-v ,@(rest clauses)))))))
+
      (define-syntax do-match
        (lambda (stx)
          ; target better be a symbol
@@ -238,6 +242,7 @@ lexical scope
          (define on-success (fourth stx))
          (define on-fail (fifth stx))
          (cond
+           [(eq? pat '_) ,on-success]
            [(symbol? pat) `(let ([,pat ,target]) ,on-success)]
            [(not (cons? pat)) `(if (equal? ,pat ,target) ,on-success ,on-fail)]
            [(eq? (first pat) 'quote)
@@ -276,7 +281,19 @@ lexical scope
                           ,(second pat)
                           (begin ,@(map (lambda (iter-v v) `(set! ,iter-v (cons ,v ,iter-v))) iter-v* v*)
                                  (loop (rest ,elements)))
-                          ,on-fail)))))])))
+                          ,on-fail)))))]
+           [(eq? (first pat) 'quasiquote)
+            ; don't worry about depth
+            (define datum (second pat))
+            (cond
+              [(not (cons? datum)) `(do-match ,target ',datum ,on-success ,on-fail)]
+              [(eq? (first datum) 'unquote) `(do-match ,target ,(second datum) ,on-success ,on-fail)]
+              [#t `(do-match ,target
+                             (cons ,(list 'quasiquote (car datum))
+                                   ,(list 'quasiquote (cdr datum)))
+                             ,on-success
+                             ,on-fail)])]
+           [#t 'error-match-unknown-pattern])))
 
      (define pat-bound-vars
        (lambda (pat)
@@ -284,9 +301,24 @@ lexical scope
            [(symbol? pat) (list pat)]
            [(not (cons? pat)) '()]
            [(eq? (first pat) 'quote) '()]
+           [(eq? (first pat) 'quasiquote)
+            (cond
+              [(not (cons? datum)) '()]
+              [(eq? (first datum) 'unquote) (pat-bound-vars (second datum))]
+              [#t (append (pat-bound-vars (list 'quasiquote (car datum)))
+                          (pat-bound-vars (list 'quasiquote (cdr datum))))])]
            [(eq? (first pat) 'cons) (append (pat-bound-vars (second pat)) (pat-bound-vars (third pat)))]
            [(eq? (first pat) 'list) (apply append (map pat-bound-vars (rest pat)))]
-           [(eq? (first pat) 'listof) (pat-bound-vars (second pat))])))))
+           [(eq? (first pat) 'listof) (pat-bound-vars (second pat))]
+           [#t 'error-pat-bound-vars-unknown-pattern])))
+
+     (define-syntax let*
+       (lambda (stx)
+         (match stx
+           [`(let* () . ,body) `(let () . ,body)]
+           [`(let* ([,var ,rhs] . ,rest-bindings) . ,body)
+            `(let ([,var ,rhs])
+               (let* ,rest-bindings . ,body))])))))
 
 (define (eval-top expr)
   (eval `(let () ,prelude (let () ,expr)) initial-env))
@@ -400,6 +432,8 @@ lexical scope
     '(match '((1 2) (3 4) (5 6))
        [(listof (list a b)) (list a b)]))
    '((1 3 5) (2 4 6)))
+  (teval (match '(1 2 3)
+           [`(1 . ,(list a b)) (list a b)]))
   ; let non-recursive
   (teval (let ([f (lambda () 2)])
            (let ([f (lambda () (f))])
@@ -407,4 +441,6 @@ lexical scope
   ; map
   (teval (map add1 (list 1 2 3)))
   (teval (map (lambda (x) (add1 x)) (list 1 2 3)))
-  (teval (map (lambda (x y) (list x y)) (list 1 2 3) (list 4 5 6))))
+  (teval (map (lambda (x y) (list x y)) (list 1 2 3) (list 4 5 6)))
+  ; let*
+  (teval (let* ([x 1] [x (add1 x)]) x)))
