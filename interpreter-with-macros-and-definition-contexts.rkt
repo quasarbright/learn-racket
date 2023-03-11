@@ -2,10 +2,16 @@
 
 #|
 an interpreter for a language with:
-recursive definition contexts
+local variables (let)
+recursive definitions (define)
+first-class functions with closures
 (non-hygienic) macros
 quasiquoting
 lexical scope
+mutable variables
+pattern matching
+lists
+a standard library of functions and macros
 |#
 
 (require racket/list
@@ -24,6 +30,7 @@ lexical scope
 
 ; a value is one of
 ; atomic data
+; (listof value)
 ; (value ... -> value)
 ; transformer
 ; void
@@ -70,7 +77,7 @@ lexical scope
     [(? symbol? var) (env-lookup env var)]
     [(cons (or 'define 'define-syntax) _)
      (error "definitions are not allowed in an expression context")]
-    [(list 'eval expr) (recur (recur expr))]
+    [`(eval ,expr) (recur (recur expr))]
     [`(if ,cnd ,thn ,els)
      (if (recur cnd)
          (recur thn)
@@ -82,18 +89,18 @@ lexical scope
          (void)
          (for/last ([expr exprs])
            (recur expr)))]
-    [(list 'let (? symbol? name) (list (list vars exprs) ...) body ...)
+    [`(let ,name ([,vars ,exprs] ...) ,body ...)
      (recur `(let ()
                (define ,name (lambda ,vars ,@body))
                (,name ,@exprs)))]
-    [(list 'let (list (list vars exprs) ...) body ...)
+    [`(let ([,vars ,exprs] ...) ,body ...)
      (let ([env (env-add-frame env (make-hasheq (map cons vars (map recur exprs))))])
        (eval-body body env))]
     [`(set! ,var ,expr)
      (define val (recur expr))
      (env-set! env var val)
      (void)]
-    [(list 'lambda (list argnames ...) body ...)
+    [`(lambda (,argnames ...) ,body ...)
      (lambda args (apply-function argnames args env body))]
     [(cons func args)
      (define func^ (recur func))
@@ -179,7 +186,6 @@ lexical scope
   (list (make-hasheq)
         (make-hasheq (list (cons 'name name) ...))))
 
-; TODO some built-in macros. easiest way might be a prelude.
 (define initial-env
   (make-builtins + * - / add1 sub1 equal? eq? list cons car cdr cadr null? cons? gensym symbol?
                  first second third fourth fifth rest list-ref length < <= > >= =
@@ -432,9 +438,10 @@ lexical scope
     '(match '((1 2) (3 4) (5 6))
        [(listof (list a b)) (list a b)]))
    '((1 3 5) (2 4 6)))
+  ; quasipattern with cons
   (teval (match '(1 2 3)
            [`(1 . ,(list a b)) (list a b)]))
-  ; let non-recursive
+  ; let is non-recursive
   (teval (let ([f (lambda () 2)])
            (let ([f (lambda () (f))])
              (f))))
