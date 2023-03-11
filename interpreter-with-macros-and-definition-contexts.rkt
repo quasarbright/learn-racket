@@ -85,6 +85,10 @@ lexical scope
          (void)
          (for/last ([expr exprs])
            (recur expr)))]
+    [(list 'let (? symbol? name) (list (list vars exprs) ...) body ...)
+     (recur `(let ()
+               (define ,name (lambda ,vars ,@body))
+               (,name ,@exprs)))]
     [(list 'let (list (list vars exprs) ...) body ...)
      (let ([env (env-add-frame env (make-hasheq (map cons vars (map recur exprs))))])
        (eval-body body env))]
@@ -116,9 +120,9 @@ lexical scope
 ; (listof varname) (listof val) env (listof expr) -> value
 (define (apply-function argnames args env body)
   (unless (= (length argnames) (length args))
-    (error "arity error: expected ~v but received ~v"
-           (length argnames)
-           (length args)))
+    (error (format "arity error: expected ~v arguments but received ~v"
+                   (length argnames)
+                   (length args))))
   (define env^
     (env-add-frame env
                    (make-hasheq (map cons argnames args))))
@@ -194,10 +198,88 @@ lexical scope
 
 ; TODO some built-in macros. easiest way might be a prelude.
 (define initial-env
-  (make-builtins + * equal? list cons car cdr null? cons? gensym first second third rest list-ref length < <= > >=))
+  (make-builtins + * - / add1 sub1 equal? eq? list cons car cdr cadr null? cons? gensym symbol?
+                 first second third fourth fifth rest list-ref length < <= > >= =
+                 not void void? displayln println format))
+
+(define prelude
+  '(begin
+     (define-syntax and
+       (lambda (stx)
+         (if (null? (rest stx))
+             #t
+             `(if ,(second stx)
+                  (and ,@(rest (rest stx)))
+                  #f))))
+     (define-syntax or
+       (lambda (stx)
+         (define v (gensym))
+         (if (null? (rest stx))
+             #f
+             `(let ([,v ,(second stx)])
+                (if v
+                    v
+                    (or ,@(rest (rest stx))))))))
+     (define-syntax cond
+       (lambda (stx)
+         (if (null? (cdr stx))
+             ; TODO errors
+             'error
+             (let ()
+               (define clause (car (cdr stx)))
+               (define clauses (cdr (cdr stx)))
+               (define cnd (first clause))
+               (define thn (rest clause))
+               `(if ,cnd
+                    (let () ,@thn)
+                    (cond ,@clauses))))))
+     (define-syntax match
+       (lambda (stx)
+         (define target (second stx))
+         (define clauses (rest (rest stx)))
+         (define target-v (gensym 'target-v))
+         (if (null? clauses)
+             ; TODO errors
+             'error
+             ; this will introduce linear duplicate lets
+             `(let ([,target-v ,target])
+                (do-match ,target-v
+                          ,(first (first clauses))
+                          (begin ,@(rest (first clauses)))
+                          (match ,target-v ,@(rest clauses)))))))
+     (define-syntax do-match
+       (lambda (stx)
+         ; target better be a symbol
+         (define target (second stx))
+         (define pat (third stx))
+         (define on-success (fourth stx))
+         (define on-fail (fifth stx))
+         (cond
+           [(symbol? pat) `(let ([,pat ,target]) ,on-success)]
+           [(not (cons? pat)) `(if (equal? ,pat ,target) ,on-success ,on-fail)]
+           [(eq? (first pat) 'quote)
+            `(if (equal? ,target ',(second pat))
+                 ,on-success
+                 ,on-fail)]
+           [(eq? (first pat) 'cons)
+            (define car-v (gensym 'car-v))
+            (define cdr-v (gensym 'cdr-v))
+            (define car-pat (second pat))
+            (define cdr-pat (third pat))
+            `(if (cons? ,target)
+                 (let ([,car-v (car ,target)]
+                       [,cdr-v (cdr ,target)])
+                   (do-match ,car-v ,car-pat (do-match ,cdr-v ,cdr-pat ,on-success ,on-fail) ,on-fail))
+                 ,on-fail)]
+           [(eq? (first pat) 'list)
+            (define pat^ (let loop ([pats (rest pat)])
+                           (if (null? pats)
+                               ''()
+                               `(cons ,(first pats) ,(loop (rest pats))))))
+            `(do-match ,target ,pat^ ,on-success ,on-fail)])))))
 
 (define (eval-top expr)
-  (eval expr initial-env))
+  (eval `(let () ,prelude (let () ,expr)) initial-env))
 
 (module+ test
   (require rackunit)
@@ -244,7 +326,7 @@ lexical scope
              (lambda (n)
                (if (equal? 0 n)
                    1
-                   (* n (fac (+ -1 n))))))
+                   (* n (fac (sub1 n))))))
            (fac 5)))
   ; mutual recursion
   (teval (let ()
@@ -252,13 +334,16 @@ lexical scope
              (lambda (n)
                (if (equal? 0 n)
                    #t
-                   (odd? (+ -1 n)))))
+                   (odd? (sub1 n)))))
            (define odd?
              (lambda (n)
                (if (equal? 1 n)
                    #t
-                   (even? (+ -1 n)))))
+                   (even? (sub1 n)))))
            (even? 10)))
+  ; named let
+  (teval (let loop ([n 10])
+           (if (= 0 n) 0 (+ n (loop (sub1 n))))))
   ; quasiquote
   (teval (let ((x 2)) `,x))
   (teval (let ((x 2)) `(x ,x)))
@@ -291,5 +376,16 @@ lexical scope
                 (swap! x y)
                 (list x y)))
    '(2 1))
-  ; TODO match macro
-  )
+  ; use built-in macro from prelude
+  (teval (cond [#f 1]
+               [#f 2]
+               ['true 3]
+               [#f 4]))
+  ; match macro
+  (teval (match (list 1 2)
+           [(list a b c) #f]
+           [(list a b) (list b a)]))
+  ; let non-recursive
+  (teval (let ([f (lambda () 2)])
+           (let ([f (lambda () (f))])
+             (f)))))
