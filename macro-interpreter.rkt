@@ -18,7 +18,6 @@
 
 (define (lookup-builtin x) (let ((v (assoc x builtins))) (if v (second v) v)))
 
-(require racket/struct)
 (struct closure (argnames body env) #:inspector #f)
 
 (define (eval env e)
