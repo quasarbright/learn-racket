@@ -183,7 +183,7 @@ lexical scope
 (define initial-env
   (make-builtins + * - / add1 sub1 equal? eq? list cons car cdr cadr null? cons? gensym symbol?
                  first second third fourth fifth rest list-ref length < <= > >= =
-                 not void void? displayln println format))
+                 not void void? displayln println format map append remove-duplicates apply reverse))
 
 (define prelude
   '(begin
@@ -265,22 +265,28 @@ lexical scope
             (define iter-v* (map gensym v*))
             (define elements (gensym 'elements))
             (define first-element (gensym 'first-element))
-            `(let loop ([,elements ,target])
-               (if (null? ,elements)
-                   (let ,(map (lambda (iter-v v) (list v `(reverse ,iter-v))) iter-v* v*))
-                   (let ([,first-element (first ,elements)])
-                     (let ,(map (lambda (iter-v) (list iter-v '())) iter-v*)
+            `(let ,(map (lambda (iter-v) (list iter-v '())) iter-v*)
+                 (let loop ([,elements ,target])
+                   (if (null? ,elements)
+                       (let ,(map (lambda (iter-v v) (list v `(reverse ,iter-v))) iter-v* v*)
+                           ,on-success)
+                       (let ([,first-element (first ,elements)])
                          (do-match
                           ,first-element
                           ,(second pat)
                           (begin ,@(map (lambda (iter-v v) `(set! ,iter-v (cons ,v ,iter-v))) iter-v* v*)
                                  (loop (rest ,elements)))
-                          ,on-fail)))))])))))
+                          ,on-fail)))))])))
 
-; TODO map
-; tricky bc higher order and needs varargs
-; maybe instead of closures, function values are lambdas and macros are tagged lambdas
-; that way you get interop
+     (define pat-bound-vars
+       (lambda (pat)
+         (cond
+           [(symbol? pat) (list pat)]
+           [(not (cons? pat)) '()]
+           [(eq? (first pat) 'quote) '()]
+           [(eq? (first pat) 'cons) (append (pat-bound-vars (second pat)) (pat-bound-vars (third pat)))]
+           [(eq? (first pat) 'list) (apply append (map pat-bound-vars (rest pat)))]
+           [(eq? (first pat) 'listof) (pat-bound-vars (second pat))])))))
 
 (define (eval-top expr)
   (eval `(let () ,prelude (let () ,expr)) initial-env))
@@ -389,7 +395,16 @@ lexical scope
   (teval (match (list 1 2)
            [(list a b c) #f]
            [(list a b) (list b a)]))
+  (check-equal?
+   (eval-top
+    '(match '((1 2) (3 4) (5 6))
+       [(listof (list a b)) (list a b)]))
+   '((1 3 5) (2 4 6)))
   ; let non-recursive
   (teval (let ([f (lambda () 2)])
            (let ([f (lambda () (f))])
-             (f)))))
+             (f))))
+  ; map
+  (teval (map add1 (list 1 2 3)))
+  (teval (map (lambda (x) (add1 x)) (list 1 2 3)))
+  (teval (map (lambda (x y) (list x y)) (list 1 2 3) (list 4 5 6))))
