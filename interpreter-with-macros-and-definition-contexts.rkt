@@ -25,15 +25,12 @@ lexical scope
 ; a value is one of
 ; atomic data
 ; (value ... -> value)
-; closure
+; transformer
 ; void
 
-; a closure is a
-(struct closure [argnames body env is-macro?] #:transparent)
-; argnames: (listof varname)
-; body: (listof expr)
-; env: env
-; is-macro: boolean
+; a transformer is a
+(struct transformer [proc] #:transparent)
+; where proc is a (expr -> expr)
 
 (define (empty-env) '())
 
@@ -96,25 +93,15 @@ lexical scope
      (define val (recur expr))
      (env-set! env var val)
      (void)]
-    [(list 'lambda (list vars ...) exprs ...)
-     (closure vars exprs env #f)]
+    [(list 'lambda (list argnames ...) body ...)
+     (lambda args (apply-function argnames args env body))]
     [(cons func args)
      (define func^ (recur func))
      (match func^
-       [(closure argnames body func-env is-macro?)
-        (if is-macro?
-            (recur (apply-function argnames
-                                   (list expr)
-                                   func-env
-                                   body))
-            (apply-function argnames
-                            (map recur args)
-                            func-env
-                            body))]
-       [(? procedure?)
-        ; built-in
-        (define args^ (map recur args))
-        (apply func^ args^)]
+       [(transformer proc)
+        (recur (proc expr))]
+       [(? procedure? proc)
+        (apply proc (map recur args))]
        [_ (error (format "application expected procedure but received ~v" func^))])]))
 
 ; (listof varname) (listof val) env (listof expr) -> value
@@ -153,12 +140,8 @@ lexical scope
      (env-bind! env var (eval-body body env))
      (void)]
     [(list 'define-syntax var body ...)
-     (define transformer (eval-body body env))
-     (define transformer^
-       (if (closure? transformer)
-           (struct-copy closure transformer [is-macro? #t])
-           transformer))
-     (env-bind! env var transformer^)
+     (define trans (transformer (eval-body body env)))
+     (env-bind! env var trans)
      (void)]
     [_ (eval expr env)]))
 
