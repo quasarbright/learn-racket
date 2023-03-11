@@ -21,7 +21,15 @@
     #:binding (re-export p)
     (not p:pat)
     ; you don't want to export from a `not`
-    #:binding {(recursive p)})
+    #:binding {(recursive p)}
+    (list p:lvp ...)
+    #:binding (re-export p))
+  (nonterminal/two-pass lvp
+    #:allow-extension pat-macro
+    #:binding-space pm
+    (~literal ...)
+    p:pat
+    #:binding (re-export p))
   (nonterminal clause
     [p:pat body:racket-expr ...+]
     #:binding {(recursive p) body})
@@ -44,7 +52,7 @@
     [(_ target:id pat on-success on-fail)
      (syntax-parse #'pat
        ; TODO something better then datum
-       #:datum-literals (var and2 ? app)
+       #:datum-literals (var and2 ? app not list)
        [x:id #'(let ([x target]) on-success)]
        [(var x:id) #'(let ([x target]) on-success)]
        [(and2 p1 p2)
@@ -57,9 +65,69 @@
         #'(let ([new-target (proc target)])
             (do-match new-target p on-success on-fail))]
        [(not p)
-        #'(do-match target p on-fail on-success)])]))
+        #'(do-match target p on-fail on-success)]
+       [(list lvp ...)
+        #'(if (list? target)
+              (do-list-match target (lvp ...) on-success on-fail)
+              on-fail)])]))
 
-; TODO shouldn't have to mess with make-interned-syntax-introducer
+(define-syntax do-list-match
+  (syntax-parser
+    [(_ target:id (lvp ...) on-success on-fail)
+     (syntax-parse (attribute lvp)
+       [() #'(do-match target (? null?) on-success on-fail)]
+       [(p (~literal ...) lvp ...)
+        #`(do-repeated-match target p target^ (do-list-match target^ (lvp ...) on-success on-fail))]
+       [(p lvp ...)
+        #'(if (cons? target)
+              (let ([car-target (car target)]
+                    [cdr-target (cdr target)])
+                (do-match car-target p
+                          (do-match cdr-target (list lvp ...) on-success on-fail)
+                          on-fail))
+              on-fail)])]))
+
+(define-syntax do-repeated-match
+  (syntax-parser
+    ; greedily match the pattern on the list target.
+    ; variables bound are bound to a list of their matches.
+    ; binds resulting target list to target^ (after consuming matches).
+    ; naive and greedy. (match '(1 1) [(list 1 ... 1) #t]) will fail bc 1 ... will eat it all up.
+    ; TODO backtracking if you eat too much and cause the rest of the list to fail when it shouldn't
+    [(_ target:id p target^:id on-success)
+     (define/syntax-parse (v* ...) (bound-vars #'p))
+     (define/syntax-parse (iter-v* ...) (generate-temporaries (attribute v*)))
+     ; what you want is to parse this. then, try parsing more. if this ends up in an overall failure,
+     ; then back track and don't parse this. Just pretend this parse failed and use on-success.
+     ; what'll happen is you'll parse greedily. Then if that fails, you'll backtrack and parse 1 less
+     ; and see if that worked. Then, you'll keep doing that until you succeed or backtrack into 0 parses.
+     ; From the perspective of this call, it's either parse and continue or parse nothing and use on-success
+     ; Only do set! after you know you don't need to backtrack. Then you may not need to reverse.
+     #'(let ([iter-v* '()] ...)
+         (let loop ([target^ target])
+           (if (null? target^)
+               (let ([v* (reverse iter-v*)] ...)
+                 on-success)
+               (let ([first-target (first target^)])
+                 (do-match first-target p
+                           (begin (set! iter-v* (cons v* iter-v*)) ...
+                                  (loop (rest target^)))
+                           (let ([v* (reverse iter-v*)] ...)
+                             on-success))))))]))
+
+(begin-for-syntax
+  (define (bound-vars p)
+    ; TODO
+    (syntax-parse p
+      #:datum-literals (var and2 ? app not list)
+      [x:id (list #'x)]
+      [(var x:id) (list #'x)]
+      [(and2 p1 p2) (append (bound-vars #'p1) (bound-vars #'p2))]
+      [(? _) '()]
+      [(app _ p) (bound-vars #'p)]
+      [(not _) '()]
+      [(list p ...) (apply append (map bound-vars (attribute p)))])))
+
 (define-syntax define-match-expander
   (syntax-parser
     [(_ name:id trans:expr)
@@ -90,14 +158,11 @@
      #'(equal? 'lit)]))
 (define-match-expander quasiquote
   (syntax-parser
-    [(_ x:id) #''x]
     [(_ ((~datum unquote) p)) #'p]
-    [(_ (qp ...)) #'(list (quasiquote qp) ...)]))
-(define-match-expander list
-  (syntax-parser
-    [(_) #''()]
-    [(_ p0 p ...)
-     #'(cons p0 (list p ...))]))
+    ; TODO unquote-splicing
+    [(_ (qp-car . qp-cdr)) #'(cons `qp-car `qp-cdr)]
+    [(_ x) #''x]))
+
 (module+ test
   (require rackunit)
   (check-equal? (match 2 [x x]) 2)
@@ -144,4 +209,18 @@
   ; nesting would make it catch this, but the previous test would still wrongly work
   #;
   (check-equal? (match 2 [(and2 (app (lambda (y) x) z) x) (list x z)])
-                '(2 2)))
+                '(2 2))
+  ; lvp
+  (check-equal? (match '(1 1 1) [(list '1 ...) #t])
+                #t)
+  (check-equal? (match '(1 1 1) [(list '2 ... '1 '1 '1) #t])
+                #t)
+  (check-equal? (match '((1 2) (3 4) (5 6))
+                  [(list (list a b) ...) (list a b)])
+                '((1 3 5) (2 4 6)))
+  ; not naively greedy
+  (check-equal? (match '(1 1 1 1 1)
+                  [(list a ... '1 '1)
+                   a]
+                  [_ 'bad])
+                '(1 1 1)))
