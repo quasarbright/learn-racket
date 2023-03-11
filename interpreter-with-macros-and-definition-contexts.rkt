@@ -276,7 +276,28 @@ lexical scope
                            (if (null? pats)
                                ''()
                                `(cons ,(first pats) ,(loop (rest pats))))))
-            `(do-match ,target ,pat^ ,on-success ,on-fail)])))))
+            `(do-match ,target ,pat^ ,on-success ,on-fail)]
+           [(eq? (first pat) 'listof)
+            (define v* (pat-bound-vars (second pat)))
+            (define iter-v* (map gensym v*))
+            (define elements (gensym 'elements))
+            (define first-element (gensym 'first-element))
+            `(let loop ([,elements ,target])
+               (if (null? ,elements)
+                   (let ,(map (lambda (iter-v v) (list v `(reverse ,iter-v))) iter-v* v*))
+                   (let ([,first-element (first ,elements)])
+                     (let ,(map (lambda (iter-v) (list iter-v '())) iter-v*)
+                         (do-match
+                          ,first-element
+                          ,(second pat)
+                          (begin ,@(map (lambda (iter-v v) `(set! ,iter-v (cons ,v ,iter-v))) iter-v* v*)
+                                 (loop (rest ,elements)))
+                          ,on-fail)))))])))))
+
+; TODO map
+; tricky bc higher order and needs varargs
+; maybe instead of closures, function values are lambdas and macros are tagged lambdas
+; that way you get interop
 
 (define (eval-top expr)
   (eval `(let () ,prelude (let () ,expr)) initial-env))
