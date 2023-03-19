@@ -75,8 +75,13 @@ a standard library of functions and macros
   (match expr
     [(? (disjoin number? string? boolean? null?)) expr]
     [(? symbol? var) (env-lookup env var)]
-    [(cons (or 'define 'define-syntax) _)
-     (error "definitions are not allowed in an expression context")]
+    [`(define ,var ,body ...)
+     (env-bind! env var (eval-body body env))
+     (void)]
+    [`(define-syntax ,var ,body ...)
+     (define trans (transformer (eval-body body env)))
+     (env-bind! env var trans)
+     (void)]
     [`(eval ,expr) (recur (recur expr))]
     [`(if ,cnd ,thn ,els)
      (if (recur cnd)
@@ -125,32 +130,8 @@ a standard library of functions and macros
 ; (listof expr) env -> value
 ; evaluates body in a recursive definition context.
 (define (eval-body body env)
-  (let ([body (splice-begins body)])
-    (if (null? body)
-        (void)
-        (let ([env (env-add-frame env)])
-          (for/last ([expr body])
-            (eval-body-expr expr env))))))
-
-(define (splice-begins exprs)
-  (if (null? exprs)
-      exprs
-      (match (first exprs)
-        [(cons 'begin sub-exprs)
-         (append (splice-begins sub-exprs) (splice-begins (rest exprs)))]
-        [expr (cons expr (splice-begins (rest exprs)))])))
-
-; like eval, but allow definitions
-(define (eval-body-expr expr env)
-  (match expr
-    [(list 'define var body ...)
-     (env-bind! env var (eval-body body env))
-     (void)]
-    [(list 'define-syntax var body ...)
-     (define trans (transformer (eval-body body env)))
-     (env-bind! env var trans)
-     (void)]
-    [_ (eval expr env)]))
+  (let ([env (env-add-frame env)])
+    (eval (cons 'begin body) env)))
 
 ; level is number of enclosing quasiquotes - the number of enclosung unquotes or unquote-splicings
 (define (eval-quasi expr env level)
@@ -449,4 +430,59 @@ a standard library of functions and macros
   (teval (map (lambda (x) (add1 x)) (list 1 2 3)))
   (teval (map (lambda (x y) (list x y)) (list 1 2 3) (list 4 5 6)))
   ; let*
-  (teval (let* ([x 1] [x (add1 x)]) x)))
+  (teval (let* ([x 1] [x (add1 x)]) x))
+  ; macro expands to definition
+  (check-equal?
+   (eval-top
+    '(let ()
+       (define-syntax my-define
+         (lambda (stx)
+           (match stx
+             [`(my-define ,x ,e) `(define ,x ,e)])))
+       (my-define x 2)
+       x))
+   2)
+  ; eval definition
+  (check-equal?
+   (eval-top
+    '(let ()
+       (eval '(define x 2))
+       x))
+   2)
+  ; macro-defining macro
+  (check-equal?
+   (eval-top
+    '(let ()
+       (define-syntax define-rewrite
+         (lambda (stx)
+           (match stx
+             [`(define-rewrite (,name . ,args) ,rhs)
+              (define stx-v (gensym))
+              `(define-syntax ,name
+                 (lambda (,stx-v)
+                   (match ,stx-v
+                     [,(list 'quasiquote (cons name args))
+                      ,(list 'quasiquote rhs)])))])))
+       (define-rewrite (modify! ,v ,proc) (set! ,v (,proc ,v)))
+       (define x 1)
+       (modify! x add1)
+       x))
+   2)
+  ; macro emitting begin splices
+  (check-equal?
+   (eval-top
+    '(let ()
+       (define-syntax m
+         (lambda (stx) `(begin (define x 1) (define y 2))))
+       (m)
+       (list x y)))
+   '(1 2))
+  ; shadow definitions
+  (teval (let ()
+           (define x 2)
+           (define tmp
+             (let ()
+               ; should shadow and not mutate
+               (define x 3)
+               x))
+           (list tmp x))))
