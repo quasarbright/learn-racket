@@ -1,5 +1,7 @@
 #lang racket/base
 
+(provide (all-defined-out) (for-space pm (all-defined-out)))
+
 (require racket/list
          syntax-spec
          (for-syntax racket/base syntax/parse))
@@ -31,6 +33,7 @@
     p:pat
     #:binding (re-export p))
   (nonterminal clause
+    #:binding-space pm
     [p:pat body:racket-expr ...+]
     #:binding {(recursive p) body})
   (host-interface/expression
@@ -39,53 +42,59 @@
        (let ([target-pv target])
          (match-clauses target-pv c ...)))))
 
+(define current-failure-proc (make-parameter 'unset))
+; only call in tail, not an escape
+(define (fail-match) ((current-failure-proc)))
+
 (define-syntax match-clauses
   (syntax-parser
     [(_ target:id c ...)
      (syntax-parse #'(c ...)
        [() #'(error 'match "no matching clause for ~a" target)]
        [([p body ...+] c ...)
-        #'(do-match target p (begin body ...) (match-clauses target c ...))])]))
+        #'(parameterize ([current-failure-proc (lambda () (match-clauses target c ...))])
+            (do-match target p (begin body ...)))])]))
 
 (define-syntax do-match
   (syntax-parser
-    [(_ target:id pat on-success on-fail)
+    [(_ target:id pat on-success)
      (syntax-parse #'pat
        ; TODO something better then datum
        #:datum-literals (var and2 ? app not list)
        [x:id #'(let ([x target]) on-success)]
        [(var x:id) #'(let ([x target]) on-success)]
        [(and2 p1 p2)
-        #'(do-match target p1 (do-match target p2 on-success on-fail) on-fail)]
+        #'(do-match target p1 (do-match target p2 on-success))]
        [(? pred)
         #'(if (pred target)
               on-success
-              on-fail)]
+              (fail-match))]
        [(app proc p)
         #'(let ([new-target (proc target)])
-            (do-match new-target p on-success on-fail))]
+            (do-match new-target p on-success))]
        [(not p)
-        #'(do-match target p on-fail on-success)]
+        #'(let ([old-failure-proc (current-failure-proc)])
+            (parameterize ([current-failure-proc (lambda () on-success)])
+              (do-match target p (old-failure-proc))))]
        [(list lvp ...)
         #'(if (list? target)
-              (do-list-match target (lvp ...) on-success on-fail)
-              on-fail)])]))
+              (do-list-match target (lvp ...) on-success)
+              (fail-match))])]))
 
 (define-syntax do-list-match
   (syntax-parser
-    [(_ target:id (lvp ...) on-success on-fail)
+    [(_ target:id (lvp ...) on-success)
      (syntax-parse (attribute lvp)
-       [() #'(do-match target (? null?) on-success on-fail)]
+       [() #'(do-match target (? null?) on-success)]
        [(p (~literal ...) lvp ...)
-        #`(do-repeated-match target p target^ (do-list-match target^ (lvp ...) on-success on-fail))]
+        #`(do-repeated-match target p target^ (do-list-match target^ (lvp ...) on-success))]
        [(p lvp ...)
         #'(if (cons? target)
               (let ([car-target (car target)]
                     [cdr-target (cdr target)])
                 (do-match car-target p
-                          (do-match cdr-target (list lvp ...) on-success on-fail)
-                          on-fail))
-              on-fail)])]))
+                          (do-match cdr-target (list lvp ...) on-success)))
+              (fail-match))])]))
 
 (define-syntax do-repeated-match
   (syntax-parser
@@ -104,16 +113,19 @@
      ; From the perspective of this call, it's either parse and continue or parse nothing and use on-success
      ; Only do set! after you know you don't need to backtrack. Then you may not need to reverse.
      #'(let ([iter-v* '()] ...)
-         (let loop ([target^ target])
-           (if (null? target^)
-               (let ([v* (reverse iter-v*)] ...)
-                 on-success)
-               (let ([first-target (first target^)])
-                 (do-match first-target p
-                           (begin (set! iter-v* (cons v* iter-v*)) ...
-                                  (loop (rest target^)))
-                           (let ([v* (reverse iter-v*)] ...)
-                             on-success))))))]))
+         (let ([old-failure-proc (current-failure-proc)])
+           (let loop ([target^ target])
+             ; needs to be defined inside to close over target^
+             (define (continue)
+               (parameterize ([current-failure-proc old-failure-proc])
+                                            (let ([v* (reverse iter-v*)] ...) on-success)))
+             (if (null? target^)
+                 (continue)
+                 (let ([first-target (first target^)])
+                   (parameterize ([current-failure-proc (lambda () (continue))])
+                     (do-match first-target p
+                               (begin (set! iter-v* (cons v* iter-v*)) ...
+                                      (loop (rest target^))))))))))]))
 
 (begin-for-syntax
   (define (bound-vars p)
@@ -223,4 +235,6 @@
                   [(list a ... '1 '1)
                    a]
                   [_ 'bad])
-                '(1 1 1)))
+                '(1 1 1))
+  ; make sure 'not' maintains bindings
+  (check-equal? (match 1 [(and x (not (? even?)) y) (list x y)]) '(1 1)))
