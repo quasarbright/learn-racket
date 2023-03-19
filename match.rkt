@@ -78,7 +78,10 @@
               (do-match target p (old-failure-proc))))]
        [(list lvp ...)
         #'(if (list? target)
-              (do-list-match target (lvp ...) on-success)
+              ; do-list-match may trash failure-proc for backtracking, so fix it to avoid redundant backtracks
+              (let ([old-failure-proc (current-failure-proc)])
+                (do-list-match target (lvp ...) (parameterize ([current-failure-proc old-failure-proc])
+                                                  on-success)))
               (fail-match))])]))
 
 (define-syntax do-list-match
@@ -106,6 +109,7 @@
     [(_ target:id p target^:id on-success)
      (define/syntax-parse (v* ...) (bound-vars #'p))
      (define/syntax-parse (iter-v* ...) (generate-temporaries (attribute v*)))
+     (define/syntax-parse (old-iter-v* ...) (generate-temporaries (attribute v*)))
      ; what you want is to parse this. then, try parsing more. if this ends up in an overall failure,
      ; then back track and don't parse this. Just pretend this parse failed and use on-success.
      ; what'll happen is you'll parse greedily. Then if that fails, you'll backtrack and parse 1 less
@@ -113,19 +117,30 @@
      ; From the perspective of this call, it's either parse and continue or parse nothing and use on-success
      ; Only do set! after you know you don't need to backtrack. Then you may not need to reverse.
      #'(let ([iter-v* '()] ...)
-         (let ([old-failure-proc (current-failure-proc)])
-           (let loop ([target^ target])
+         (let loop ([target^ target])
+           ; match rest of lvps
+           (define (continue)
              ; needs to be defined inside to close over target^
-             (define (continue)
-               (parameterize ([current-failure-proc old-failure-proc])
-                                            (let ([v* (reverse iter-v*)] ...) on-success)))
-             (if (null? target^)
-                 (continue)
-                 (let ([first-target (first target^)])
-                   (parameterize ([current-failure-proc (lambda () (continue))])
-                     (do-match first-target p
-                               (begin (set! iter-v* (cons v* iter-v*)) ...
-                                      (loop (rest target^))))))))))]))
+             (let ([v* (reverse iter-v*)] ...) on-success))
+           (if (null? target^)
+               (continue)
+               (let ([first-target (first target^)])
+                 ; save old state in case you need to backtrack
+                 (define old-failure-proc (current-failure-proc))
+                 (define old-iter-v* iter-v*) ...
+                 ; if the individual match fails, continue to rest of lvps
+                 (parameterize ([current-failure-proc (lambda () (continue))])
+                   (do-match first-target p
+                             ; individual match succeeded.
+                             ; keep trying to match more. if a failure follows,
+                             ; act like this match never happened and continue to rest of lvps
+                             (parameterize ([current-failure-proc (lambda ()
+                                                                    ; act like this match never happened and continue to rest of lvps
+                                                                    (set! iter-v* old-iter-v*) ...
+                                                                    (parameterize ([current-failure-proc old-failure-proc])
+                                                                      (continue)))])
+                               (set! iter-v* (cons v* iter-v*)) ...
+                               (loop (rest target^)))))))))]))
 
 (begin-for-syntax
   (define (bound-vars p)
@@ -174,6 +189,7 @@
     ; TODO unquote-splicing
     [(_ (qp-car . qp-cdr)) #'(cons `qp-car `qp-cdr)]
     [(_ x) #''x]))
+
 
 (module+ test
   (require rackunit)
@@ -231,10 +247,14 @@
                   [(list (list a b) ...) (list a b)])
                 '((1 3 5) (2 4 6)))
   ; not naively greedy
-  (check-equal? (match '(1 1 1 1 1)
-                  [(list a ... '1 '1)
+  (check-equal? (match '(1 2 3 4 5)
+                  [(list a ... '4 '5)
                    a]
                   [_ 'bad])
-                '(1 1 1))
+                '(1 2 3))
   ; make sure 'not' maintains bindings
-  (check-equal? (match 1 [(and x (not (? even?)) y) (list x y)]) '(1 1)))
+  (check-equal? (match 1 [(and x (not (? even?)) y) (list x y)]) '(1 1))
+  (check-equal? (match '(1 2 3 4 5) [(list a ... '20) 'bad] [_ 'good]) 'good)
+  ; this will lead to extra backtracks if failure handler isn't properly maintained. this test would still pass, but slowly
+  (check-equal? (match '(1 2 3 4 5) [(and (list a ...) (? (lambda (x) #f))) 'bad] [_ 'good])
+                'good))
