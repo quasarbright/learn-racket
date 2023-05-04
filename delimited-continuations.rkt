@@ -1,6 +1,10 @@
 #lang racket
 
-; an interpreter for a tiny language with delimited continuations
+(module+ test (require rackunit))
+
+; an "interpreter" for a tiny language with delimited continuations
+; really just a pre-processing step. Invokes racket's `eval` after transforming
+; the source program
 
 ; translate the program into cps
 ; invariant:
@@ -64,15 +68,37 @@
 (define call/cc-expr
   ; since f will call k, it needs to have the extra cont argument
   ; even though it will be ignored
-  '(lambda (f k) (f (lambda (val cont) (k val)) k)))
+  '(lambda (k-cc) (k-cc (lambda (f k) (f (lambda (val cont) (k val)) k)))))
 
 (define (desugar expr)
   (match expr
-    [`(let ([,x ,rhs] ...) ,body)
-     `((lambda ,x ,(desugar body)) ,@(map desugar rhs))]
+    [`(let ([,x ,rhs] ...) ,@body)
+     (desugar `((lambda ,x ,@body) ,@rhs))]
+    [`(let/cc ,k ,body)
+     (desugar `(call/cc (lambda (,k) ,body)))]
+    ; TODO void
+    ['(begin) (error "empty begin")]
+    [`(begin ,expr) (desugar expr)]
+    [`(begin ,@exprs)
+     (define vs (map (lambda (_) (gensym 'v-begin)) exprs))
+     (desugar `((lambda ,vs ,(last vs)) ,@exprs))]
+    [`(lambda ,args ,@body) `(lambda ,args ,(desugar `(begin ,@body)))]
+    [`(,exprs ...) (map desugar exprs)]
     [_ expr]))
 
 (define (eval/cps expr)
   ((eval (cps-transform (desugar expr))) identity))
 
-(eval/cps '(let ([x 1]) x))
+(module+ test
+  (define-syntax-rule
+    (teval expr)
+    (check-equal? (eval/cps 'expr) (eval 'expr)))
+  (teval (let ([x 1]) x))
+  (teval (if #t 1 2))
+  (teval (if #f 1 2))
+  (teval ((lambda (x) (if x 1 2)) #t))
+  (teval (call/cc (lambda (k) 2)))
+  (teval (call/cc (lambda (k) (k 2))))
+  (teval (call/cc (lambda (k) (let ([x 1] [y (k 3)]) x))))
+  (teval (let ([x 3] [k (let/cc k k)])
+           (if k (k #f) x))))
