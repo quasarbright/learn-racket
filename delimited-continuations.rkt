@@ -2,13 +2,16 @@
 
 (module+ test (require rackunit))
 
+(define-namespace-anchor anc)
+(define ns (namespace-anchor->namespace anc))
+
 ; an "interpreter" for a tiny language with delimited continuations
 ; really just a pre-processing step. Invokes racket's `eval` after transforming
 ; the source program
 
 ; expr -> value
 (define (eval/cps expr)
-  ((eval (cps-transform (desugar expr))) identity))
+  ((eval (cps-transform (desugar expr)) ns) identity))
 
 
 ; translate the program into cps
@@ -33,7 +36,7 @@
               k))))]
     ['void
      ; if they define a variable called void, this will break
-     '(lambda (k-void) (k-void (void)))]
+     '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
      (define expr^ (cps-transform expr))
@@ -46,7 +49,7 @@
      `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
     [`(if ,cnd ,thn ,els)
      (define k (gensym 'k-if))
-     (define vcnd (gensym 'vcnd))
+     (define vcnd (gensym 'v-cnd))
      (define cnd^ (cps-transform cnd))
      (define thn^ (cps-transform thn))
      (define els^ (cps-transform els))
@@ -85,7 +88,7 @@
 ; (list-of core-expr) symbol -> cps-expr
 (define (cps-transform-app exprs k)
   (define exprs^ (map cps-transform exprs))
-  (define vs (map (lambda (_) (gensym 'v)) exprs))
+  (define vs (map (lambda (_) (gensym 'v-app)) exprs))
   (foldr (lambda (expr^ v body) `(,expr^ (lambda (,v) ,body)))
          (append vs (list k))
          exprs^
@@ -108,6 +111,9 @@
     [`(,exprs ...) (map desugar exprs)]
     [_ expr]))
 
+; TODO lift primitives like +
+; TODO lift higher order stuff like map such that you can do call/cc during map
+
 (module+ test
   (define-syntax-rule
     (teval expr)
@@ -121,4 +127,6 @@
   (teval (call/cc (lambda (k) (let ([x 1] [y (k 3)]) x))))
   (teval (let ([x 3] [k (let/cc k k)])
            (if k (k #f) x)))
-  (teval (let ([x 2]) (set! x 3) x)))
+  (teval (let ([x 2]) (set! x 3) x))
+  (teval (void))
+  (teval (void 2 3 4)))
