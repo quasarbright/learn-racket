@@ -34,6 +34,11 @@
     ['void
      ; if they define a variable called void, this will break
      '(lambda (k-void) (k-void (void)))]
+    [`(set! ,x ,expr)
+     (define k (gensym 'k-set!))
+     (define expr^ (cps-transform expr))
+     (define v (gensym 'v-set!))
+     `(lambda (,k) (,expr^ (lambda (,v) (,k (set! ,x ,v)))))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
      (define cont (gensym 'cont))
@@ -115,4 +120,5 @@
   (teval (call/cc (lambda (k) (k 2))))
   (teval (call/cc (lambda (k) (let ([x 1] [y (k 3)]) x))))
   (teval (let ([x 3] [k (let/cc k k)])
-           (if k (k #f) x))))
+           (if k (k #f) x)))
+  (teval (let ([x 2]) (set! x 3) x)))
