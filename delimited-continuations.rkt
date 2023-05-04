@@ -2,6 +2,32 @@
 
 (module+ test (require rackunit))
 
+(define current-handler (make-parameter (lambda _ (error 'fcontrol "no handler in scope"))))
+
+; like % and fcontrol, but re-installs the handler on fcontrol
+(define-syntax-rule (with-handler expr handler-expr) (with-handler/proc (lambda () expr) handler-expr))
+
+; thunk (value continuation -> any) -> any
+(define (with-handler/proc thnk handler)
+  (parameterize ([current-handler handler])
+    (thnk)))
+
+(define (perform v)
+  (let/cc k ((current-handler) v k)))
+
+(module+ test
+  (check-equal? (with-handler (list (perform 1)) (lambda (v k) (k (list v v))))
+                '((1 1)))
+  (check-equal? (with-handler (list (perform 1) (perform 2))
+                   (lambda (v k) (k (add1 v))))
+                '(2 3))
+  ; failing
+  ; looks like you can only resume once
+  (check-equal? (with-handler
+                  (list (perform 1))
+                  (lambda (v k) (list (k v) (k (add1 v)))))
+                '((1) (2))))
+
 (define-namespace-anchor anc)
 (define ns (namespace-anchor->namespace anc))
 
