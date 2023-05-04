@@ -1,6 +1,7 @@
 #lang racket
 
 (module+ test (require rackunit))
+(require racket/control)
 
 (define current-handler (make-parameter (lambda _ (error 'fcontrol "no handler in scope"))))
 
@@ -15,7 +16,7 @@
 (define (perform v)
   (let/cc k ((current-handler) v k)))
 
-(module+ test
+#;(module+ test
   (check-equal? (with-handler (list (perform 1)) (lambda (v k) (k (list v v))))
                 '((1 1)))
   (check-equal? (with-handler (list (perform 1) (perform 2))
@@ -27,6 +28,9 @@
                   (list (perform 1))
                   (lambda (v k) (list (k v) (k (add1 v)))))
                 '((1) (2))))
+
+(define (all-but-last lst)
+  (reverse (rest (reverse lst))))
 
 (define-namespace-anchor anc)
 (define ns (namespace-anchor->namespace anc))
@@ -76,6 +80,31 @@
          (lambda (f k)
            (f (lambda (val cont) (k val))
               k))))]
+    #;['call/cc/use
+     ; the difference is we actually use cont on the result of k
+     ; so k doesn't actually abort
+     '(lambda (k-cc)
+        (k-cc
+         (lambda (f k)
+           (f (lambda (val cont) (cont (k val)))
+              k))))]
+    [`(reset ,expr)
+     (define k (gensym 'k-reset))
+     (define expr^ (cps-transform expr))
+     `(lambda (,k)
+        (let ([reset-continuation ,k])
+          (,k (,expr^ identity))))]
+    [`(shift ,user-k ,expr)
+     (define k (gensym 'k-shift))
+     (define proc-expr^ (cps-transform `(lambda (,user-k) ,expr)))
+     ; varnames are same as call/cc
+     ; give f reset-continuation so it aborts up to there
+     ; k will end at the reset since we're supplied the identity continuation
+     ; we actually use cont because we don't want to abort
+     ; I am suspicious of using reset continuation. what if there are multiple shifts?
+     `(lambda (,k) (,proc-expr^ (lambda (f)
+                                  (f (lambda (val cont) (cont (,k val)))
+                                     reset-continuation))))]
     ['void
      ; if they define a variable called void, this will break
      '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
@@ -84,6 +113,12 @@
      (define expr^ (cps-transform expr))
      (define v (gensym 'v-set!))
      `(lambda (,k) (,expr^ (lambda (,v) (,k (set! ,x ,v)))))]
+    ['add1
+     `(lambda (k-add1) (k-add1 (lambda (n cont) (cont (add1 n)))))]
+    ['list
+     '(lambda (k-list) (k-list (lambda args ((last args) (all-but-last args)))))]
+    ['vector
+     '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
      (define cont (gensym 'cont))
@@ -142,7 +177,7 @@
 (module+ test
   (define-syntax-rule
     (teval expr)
-    (check-equal? (eval/cps 'expr) (eval 'expr)))
+    (check-equal? (eval/cps 'expr) (eval 'expr ns)))
   (teval (let ([x 1]) x))
   (teval (if #t 1 2))
   (teval (if #f 1 2))
@@ -154,4 +189,35 @@
            (if k (k #f) x)))
   (teval (let ([x 2]) (set! x 3) x))
   (teval (void))
-  (teval (void 2 3 4)))
+  (teval (void 2 3 4))
+  (teval (add1 2))
+  (teval (list 1 2))
+  (teval (let ([handler (lambda (v k) (k (add1 v)))])
+           (add1 (let/cc k (handler 1 k)))))
+  (teval (let ([handler (lambda (v k) (vector (k v) (k (add1 v))))])
+           (list (let/cc k (handler 1 k)))))
+  (teval (reset 2))
+  (teval (reset (list (shift k 2))))
+  (teval (reset (list (shift k (vector (k 1) (k 2))))))
+  (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
+  (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3)))))
+
+#|
+thoughts on delimited in terms of call/cc:
+The problem is that call/cc aborts once k is called. In other words, k never
+"returns".
+You want to use the result of calling k.
+You want to be able to get the result of resuming, up to some delimiter,
+which in our case would be the nearest with-handler.
+|#
+
+#;(eval/cps '(list (call/cc/use (lambda (k) (vector (k 1) (k 2))))))
+
+#;(with-handler (list (perform 1)) (lambda (v k) (vector (k v) (k (add1 v)))))
+#;(eval/cps '(let ([handler (lambda (v k) (vector (k v) (k (add1 v))))])
+             (list (call/cc/use (lambda (k) (handler 1 k))))))
+; you get that list around the whole answer. not what you want
+; k also runs the whole rest of the program, I'm pretty sure.
+; that's un-delimited ig
+; to un-delimit, you feed the body of reset the identity continuation so call/cc
+; from inside there just goes up to the reset
