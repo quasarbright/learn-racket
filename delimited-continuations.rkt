@@ -13,6 +13,22 @@
 (define (eval/cps expr)
   ((eval (cps-transform (desugar expr)) ns) identity))
 
+; desugar into core language
+; expr -> core-expr
+(define (desugar expr)
+  (match expr
+    [`(let ([,x ,rhs] ...) ,@body)
+     (desugar `((lambda ,x ,@body) ,@rhs))]
+    [`(let/cc ,k ,@body)
+     (desugar `(call/cc (lambda (,k) ,@body)))]
+    ['(begin) '(void)]
+    [`(begin ,expr) (desugar expr)]
+    [`(begin ,@exprs)
+     (define vs (map (lambda (_) (gensym 'v-begin)) exprs))
+     (desugar `((lambda ,vs ,(last vs)) ,@exprs))]
+    [`(lambda ,args ,@body) `(lambda ,args ,(desugar `(begin ,@body)))]
+    [`(,exprs ...) (map desugar exprs)]
+    [_ expr]))
 
 ; translate the program into cps
 ; invariant:
@@ -93,23 +109,6 @@
          (append vs (list k))
          exprs^
          vs))
-
-; desugar into core language
-; expr -> core-expr
-(define (desugar expr)
-  (match expr
-    [`(let ([,x ,rhs] ...) ,@body)
-     (desugar `((lambda ,x ,@body) ,@rhs))]
-    [`(let/cc ,k ,@body)
-     (desugar `(call/cc (lambda (,k) ,@body)))]
-    ['(begin) '(void)]
-    [`(begin ,expr) (desugar expr)]
-    [`(begin ,@exprs)
-     (define vs (map (lambda (_) (gensym 'v-begin)) exprs))
-     (desugar `((lambda ,vs ,(last vs)) ,@exprs))]
-    [`(lambda ,args ,@body) `(lambda ,args ,(desugar `(begin ,@body)))]
-    [`(,exprs ...) (map desugar exprs)]
-    [_ expr]))
 
 ; TODO lift primitives like +
 ; TODO lift higher order stuff like map such that you can do call/cc during map
