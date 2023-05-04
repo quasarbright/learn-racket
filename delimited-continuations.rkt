@@ -6,13 +6,34 @@
 ; really just a pre-processing step. Invokes racket's `eval` after transforming
 ; the source program
 
+; expr -> value
+(define (eval/cps expr)
+  ((eval (cps-transform (desugar expr))) identity))
+
+
 ; translate the program into cps
 ; invariant:
 ; cps-ing an expr results in a function that takes in a continuation and
 ; calls it with the result of evaluating the expr
+; core-expr -> cps-expr
 (define (cps-transform expr)
   (match expr
-    ['call/cc call/cc-expr]
+    ['call/cc
+     ; since f will call k, it needs to have the extra cont argument
+     ; even though it will be ignored
+     ; k-cc is the continuation for the reference to call/cc
+     ; f is the function that receives the current continuation
+     ; k is the continuation for the call/cc application (the current continuation)
+     ; val is the value to "continue" with
+     ; cont is the continuation for the application of k (ignored)
+     '(lambda (k-cc)
+        (k-cc
+         (lambda (f k)
+           (f (lambda (val cont) (k val))
+              k))))]
+    ['void
+     ; if they define a variable called void, this will break
+     '(lambda (k-void) (k-void (void)))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
      (define cont (gensym 'cont))
@@ -56,7 +77,7 @@
 ;; And in the end, you call the function value
 ;; with all the arguments and the outer k,
 ;; since functions take in a continuation
-; (list-of expr) symbol -> expr
+; (list-of core-expr) symbol -> cps-expr
 (define (cps-transform-app exprs k)
   (define exprs^ (map cps-transform exprs))
   (define vs (map (lambda (_) (gensym 'v)) exprs))
@@ -65,19 +86,15 @@
          exprs^
          vs))
 
-(define call/cc-expr
-  ; since f will call k, it needs to have the extra cont argument
-  ; even though it will be ignored
-  '(lambda (k-cc) (k-cc (lambda (f k) (f (lambda (val cont) (k val)) k)))))
-
+; desugar into core language
+; expr -> core-expr
 (define (desugar expr)
   (match expr
     [`(let ([,x ,rhs] ...) ,@body)
      (desugar `((lambda ,x ,@body) ,@rhs))]
-    [`(let/cc ,k ,body)
-     (desugar `(call/cc (lambda (,k) ,body)))]
-    ; TODO void
-    ['(begin) (error "empty begin")]
+    [`(let/cc ,k ,@body)
+     (desugar `(call/cc (lambda (,k) ,@body)))]
+    ['(begin) '(void)]
     [`(begin ,expr) (desugar expr)]
     [`(begin ,@exprs)
      (define vs (map (lambda (_) (gensym 'v-begin)) exprs))
@@ -85,9 +102,6 @@
     [`(lambda ,args ,@body) `(lambda ,args ,(desugar `(begin ,@body)))]
     [`(,exprs ...) (map desugar exprs)]
     [_ expr]))
-
-(define (eval/cps expr)
-  ((eval (cps-transform (desugar expr))) identity))
 
 (module+ test
   (define-syntax-rule
