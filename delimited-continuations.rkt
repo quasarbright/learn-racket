@@ -4,6 +4,8 @@
 ; really just a pre-processing step. Invokes racket's `eval` after transforming
 ; the source program to cps
 
+; To get the essence of this, look at the rules for lambda, application, call/cc, shift, and reset in cps-transform
+
 (module+ test (require rackunit))
 (require racket/control)
 
@@ -37,7 +39,7 @@
 ; translate the program into cps
 ; invariant:
 ; cps-ing an expr results in a function that takes in a continuation and
-; calls it with the result of evaluating the expr
+; calls it with the result of evaluating the expr (with the exception of control flow forms)
 ; core-expr -> cps-expr
 (define (cps-transform expr)
   (match expr
@@ -95,11 +97,6 @@
      '(lambda (k-list) (k-list (lambda args ((last args) (all-but-last args)))))]
     ['vector
      '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
-    [`(lambda ,args ,body)
-     (define k (gensym 'k-lam))
-     (define cont (gensym 'cont))
-     (define body^ (cps-transform body))
-     `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
     [`(if ,cnd ,thn ,els)
      (define k (gensym 'k-if))
      (define vcnd (gensym 'v-cnd))
@@ -112,6 +109,11 @@
            (if ,vcnd
                (,thn^ ,k)
                (,els^ ,k)))))]
+    [`(lambda ,args ,body)
+     (define k (gensym 'k-lam))
+     (define cont (gensym 'cont))
+     (define body^ (cps-transform body))
+     `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
     [`(,f ,xs ...)
      (define k (gensym 'k-app))
      `(lambda (,k) ,(cps-transform-app (cons f xs) k))]
