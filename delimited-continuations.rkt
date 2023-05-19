@@ -1,43 +1,17 @@
 #lang racket
 
+; an "interpreter" for a tiny language with delimited continuations
+; really just a pre-processing step. Invokes racket's `eval` after transforming
+; the source program to cps
+
 (module+ test (require rackunit))
 (require racket/control)
-
-(define current-handler (make-parameter (lambda _ (error 'fcontrol "no handler in scope"))))
-
-; like % and fcontrol, but re-installs the handler on fcontrol
-(define-syntax-rule (with-handler expr handler-expr) (with-handler/proc (lambda () expr) handler-expr))
-
-; thunk (value continuation -> any) -> any
-(define (with-handler/proc thnk handler)
-  (parameterize ([current-handler handler])
-    (thnk)))
-
-(define (perform v)
-  (let/cc k ((current-handler) v k)))
-
-#;(module+ test
-  (check-equal? (with-handler (list (perform 1)) (lambda (v k) (k (list v v))))
-                '((1 1)))
-  (check-equal? (with-handler (list (perform 1) (perform 2))
-                   (lambda (v k) (k (add1 v))))
-                '(2 3))
-  ; failing
-  ; looks like you can only resume once
-  (check-equal? (with-handler
-                  (list (perform 1))
-                  (lambda (v k) (list (k v) (k (add1 v)))))
-                '((1) (2))))
 
 (define (all-but-last lst)
   (reverse (rest (reverse lst))))
 
 (define-namespace-anchor anc)
 (define ns (namespace-anchor->namespace anc))
-
-; an "interpreter" for a tiny language with delimited continuations
-; really just a pre-processing step. Invokes racket's `eval` after transforming
-; the source program
 
 ; expr -> value
 (define (eval/cps expr)
@@ -82,29 +56,31 @@
               k))))]
     #;['call/cc/use
      ; the difference is we actually use cont on the result of k
-     ; so k doesn't actually abort
+     ; so k doesn't abort
      '(lambda (k-cc)
         (k-cc
          (lambda (f k)
            (f (lambda (val cont) (cont (k val)))
               k))))]
     [`(reset ,expr)
+     ; stole rules from https://www.deinprogramm.de/sperber/papers/shift-reset-direct.pdf
+     ; I had reset right, but shift was a little off.
      (define k (gensym 'k-reset))
      (define expr^ (cps-transform expr))
      `(lambda (,k)
-        (let ([reset-continuation ,k])
-          (,k (,expr^ identity))))]
+        (,k (,expr^ identity)))]
     [`(shift ,user-k ,expr)
      (define k (gensym 'k-shift))
-     (define proc-expr^ (cps-transform `(lambda (,user-k) ,expr)))
-     ; varnames are same as call/cc
-     ; give f reset-continuation so it aborts up to there
-     ; k will end at the reset since we're supplied the identity continuation
-     ; we actually use cont because we don't want to abort
-     ; I am suspicious of using reset continuation. what if there are multiple shifts?
-     `(lambda (,k) (,proc-expr^ (lambda (f)
-                                  (f (lambda (val cont) (cont (,k val)))
-                                     reset-continuation))))]
+     (define expr^ (cps-transform expr))
+     ; k is the continuation of the shift expression.
+     ; user-k is the identifier in the source program which we bind to the delimited current continuation.
+     ; val is the argument provided to user-k.
+     ; cont is the continuation of the application of user-k.
+     ; It's like call/cc/use, except we give it identity instead of k so the shift escapes to the reset.
+     ; We call cont on (,k val) so calling user-k doesn't escape the shift.
+     ; We give apply expr^ to identity so the final result of the shift escapes out to the reset.
+     ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
+     `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) identity))]
     ['void
      ; if they define a variable called void, this will break
      '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
@@ -201,23 +177,3 @@
   (teval (reset (list (shift k (vector (k 1) (k 2))))))
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
   (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3)))))
-
-#|
-thoughts on delimited in terms of call/cc:
-The problem is that call/cc aborts once k is called. In other words, k never
-"returns".
-You want to use the result of calling k.
-You want to be able to get the result of resuming, up to some delimiter,
-which in our case would be the nearest with-handler.
-|#
-
-#;(eval/cps '(list (call/cc/use (lambda (k) (vector (k 1) (k 2))))))
-
-#;(with-handler (list (perform 1)) (lambda (v k) (vector (k v) (k (add1 v)))))
-#;(eval/cps '(let ([handler (lambda (v k) (vector (k v) (k (add1 v))))])
-             (list (call/cc/use (lambda (k) (handler 1 k))))))
-; you get that list around the whole answer. not what you want
-; k also runs the whole rest of the program, I'm pretty sure.
-; that's un-delimited ig
-; to un-delimit, you feed the body of reset the identity continuation so call/cc
-; from inside there just goes up to the reset
