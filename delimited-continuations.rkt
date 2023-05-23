@@ -83,6 +83,9 @@
      ; We give apply expr^ to identity so the final result of the shift escapes out to the reset.
      ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
      `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) identity))]
+    [`(dynamic-wind ,pre-thunk-expr ,value-thunk-expr ,post-thunk-expr)
+
+     'todo]
     ['void
      ; if they define a variable called void, this will break
      '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
@@ -179,3 +182,32 @@
   (teval (reset (list (shift k (vector (k 1) (k 2))))))
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
   (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3)))))
+
+#|
+playing with parameters and shift reset:
+
+
+> (require racket/control)
+> (define p (make-parameter 'init))
+> (define k (parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (shift k (parameterize ([p 'shift]) k))))))
+> (k 1)
+1
+; this one is interesting. think of it as replacing the reset with (p)
+> (parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (shift k (p)))))
+'out
+> (parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (shift k (lambda () (p))))))
+#<procedure>
+; this one is interesting to compare to the similar one that produces 'out. think of it as ((parameterize ... (lambda () (p)))) -> ((lambda () (p))) -> (p) -> 'init
+> ((parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (shift k (lambda () (p)))))))
+'init
+> (parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (list (shift k (k 1)) (p)))))
+'(1 reset)
+> (parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (list (shift k k) (p)))))
+#<procedure:.../racket/control.rkt:158:23>
+> (define k (parameterize ([p 'out]) (reset (parameterize ([p 'reset]) (list (shift k k) (p))))))
+> k
+#<procedure:.../racket/control.rkt:158:23>
+; k restores the parameterization context of the enclosing reset
+> (k 1)
+'(1 reset)
+|#
