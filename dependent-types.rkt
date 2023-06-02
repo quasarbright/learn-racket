@@ -15,6 +15,7 @@
 ; symbol (variable)
 ; (: Expr Expr)
 ; (lambda (symbol) Expr)
+; (let [(symbol Expr)] Expr)
 ; (Expr Expr)
 
 ; The meaning of (forall (: x t1) t2) is a function type.
@@ -66,6 +67,9 @@
     [`(: ,expr _) (eval expr env)]
     [`(lambda (,x) ,body)
      (lambda (v-x) (eval body (hash-set env x v-x)))]
+    [`(let [(,x ,rhs)] ,body)
+     (define v-rhs (eval rhs env))
+     (eval body (hash-set env x v-rhs))]
     [`(forall (: ,x ,t-x) ,t-ret)
      ; remember, t-x and t-ret are expressions
      ; t-x is the type of x
@@ -131,6 +135,9 @@
      (define v-t-x (eval t-x empty-env))
      (check t-ret '* (hash-set ctx x v-t-x))
      '*]
+    [`(let ([,x ,rhs]) ,body)
+     (define v-t-rhs (infer rhs ctx))
+     (infer body (hash-set ctx x v-t-rhs))]
     [(list lambda _ _) (error 'infer "cannot infer type of lambda")]
     [`(,rator ,rand)
      (define v-t-rator (infer rator ctx))
@@ -168,6 +175,7 @@
   (check-equal? (eval 'x (hasheq 'x 'y)) 'y)
   (check-equal? (normalize '(lambda (x) x)) '(lambda (_.0) _.0))
   (check-equal? (eval '((lambda (x) x) y) empty-env) 'y)
+  (check-equal? (eval '(let ([x y]) x) empty-env) 'y)
   (check-equal? (infer 'true ctx) 'Bool)
   (check-equal? (check 'true 'Bool ctx) (void))
   (check-equal? (check '(lambda (x) x) (list 'pi 'Bool (const 'Bool)) ctx) (void))
@@ -197,4 +205,9 @@
                            (forall (: a *) (forall (: x a) a)))
                        (list 'pi '* (lambda (a) (list 'pi a (lambda (x) a))))
                        empty-ctx)
-                (void)))
+                (void))
+  (check-equal? (infer '(let ([id (: (lambda (a) (lambda (x) x))
+                                     (forall (: a *) (forall (: x a) a)))])
+                          ((id Bool) true))
+                       ctx)
+                'Bool))
