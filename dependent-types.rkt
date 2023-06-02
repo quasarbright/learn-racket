@@ -10,16 +10,38 @@
 ; A Kind is '*
 
 ; An Expr is one of
+; '* (the kind of types)
+; (forall (: symbol Expr) Expr) (dependent function type)
 ; symbol (variable)
-; (: Expr Type)
+; (: Expr Expr)
 ; (lambda (symbol) Expr)
 ; (Expr Expr)
 
+; The meaning of (forall (: x t1) t2) is a function type.
+; t1 is the type of value that gets passed in for x. t2 is the return type.
+; But t2 can depend on the _value_ of x.
+; t1 and t2 both have to be of kind *. Remember * is of kind *.
+; Example: (forall (: x Int) Bool) is (-> Int Bool)
+; Example: (forall (: a *) (forall (: x a) a))
+;   is the type of the identity function, but it has to be instantiated with a type like ((id Nat) 1) ~> 1.
+; Example: (forall (: a *) (forall (: b *) (forall (: x a) (forall (: y b) a))))
+;   is the type of the const function
+; Example: (forall (: a *) a)
+;   is the type of a function that takes in a type and returns a value of that type (impossible)
+; Example: (forall (: a *) (forall (: n Nat) (forall (: x a) (Vec n a))))
+;   is the type of a function that takes in a vector length and a value and
+;   creates a vector of that length filled with copies of the value.
+;   Assuming Nat is of type *.
 
 ; A Value is one of
+; '* (the kind of types)
 ; (symbol -> Value)
+; (pi Type (Value -> Type)) (dependent function type)
 ; NeutralExpr
 
+; A Type is a Value
+
+;
 ; A NeutralExpr is one of
 ; symbol
 ; (NeutralExpr Value)
@@ -39,22 +61,37 @@
 ; Expr -> Value
 (define (eval expr env)
   (match expr
+    ['* '*]
     [(? symbol? expr) (hash-ref env expr expr)]
     [`(: ,expr _) (eval expr env)]
     [`(lambda (,x) ,body)
-     (lambda (v) (eval body (hash-set env x v)))]
+     (lambda (v-x) (eval body (hash-set env x v-x)))]
+    [`(forall (: ,x ,t-x) ,t-ret)
+     ; remember, t-x and t-ret are expressions
+     ; t-x is the type of x
+     ; t-ret can depend on the _value_ of x
+     (define v-t-x (eval t-x env))
+     `(pi ,v-t-x ,(lambda (v-x) (eval t-ret (hash-set env x v-x))))]
     [`(,rator ,rand)
      (match (eval rator env)
        [(and f (? procedure?)) (f (eval rand env))]
-       ; TODO check if it's a neutral once there are numbers and stuff
+       [(or '* (list 'pi _ _)) (error 'eval "bad application")]
        [n `(,n ,(eval rand env))])]))
 
 ; Value -> Expr
 (define (quote-value v [count 0])
   (match v
+    ['* '*]
     [(? symbol?) v]
     [`(,n-rator ,v-rand)
      `(,n-rator ,(quote-value v-rand count))]
+    [`(pi ,v-t-arg ,arg->t-ret)
+     (define x (number->var count))
+     ; you should probably use mutation for count.
+     ; you probably want to thread the state through for these two recursive calls.
+     ; technically doesn't matter, but still a little weird.
+     `(forall (: ,x ,(quote-value v-t-arg count))
+              ,(quote-value (arg->t-ret x) (add1 count)))]
     [(? procedure?)
      (define x (number->var count))
      `(lambda (,x) ,(quote-value (v x) (add1 count)))]))
@@ -64,7 +101,12 @@
   (check-equal? (quote-value '(x y)) '(x y))
   (check-equal? (quote-value (lambda (x) x)) '(lambda (_.0) _.0))
   (check-equal? (quote-value (lambda (x) (lambda (y) x)))
-                '(lambda (_.0) (lambda (_.1) _.0))))
+                '(lambda (_.0) (lambda (_.1) _.0)))
+  (check-equal? (quote-value '*) '*)
+  ; type of the identity function
+  ; (forall (: a *) (forall (: x a) x))
+  (check-equal? (quote-value (list 'pi '* (lambda (v) (list 'pi v (lambda (w) w)))))
+                '(forall (: _.0 *) (forall (: _.1 _.0) _.1))))
 
 ; Natural -> symbol
 (define (number->var n)
@@ -76,60 +118,83 @@
 ; Expr Context -> Type
 (define (infer expr ctx)
   (match expr
+    ['* '*]
     [(? symbol? expr)
      (hash-ref ctx expr (lambda () (error 'infer "variable not found in context")))]
     [`(: ,expr ,type)
-     (check-type type ctx)
-     (check expr type ctx)
-     type]
-    [`(lambda (,x) ,body) (error 'infer "cannot infer type of lambda")]
+     (check type '* ctx)
+     (define v-type (eval type empty-env))
+     (check expr v-type ctx)
+     v-type]
+    [`(forall (: ,x ,t-x) ,t-ret)
+     (check t-x '* ctx)
+     (define v-t-x (eval t-x empty-env))
+     (check t-ret '* (hash-set ctx x v-t-x))
+     '*]
+    [(list lambda _ _) (error 'infer "cannot infer type of lambda")]
     [`(,rator ,rand)
-     (define t-rator (infer rator ctx))
-     (match t-rator
-       [`(-> ,t-rand ,t-ret)
+     (define v-t-rator (infer rator ctx))
+     (match v-t-rator
+       [`(pi ,t-rand ,v-rand->v-t-ret)
         (check rand t-rand ctx)
-        t-ret]
-       [_ (error 'infer "applied non-function")])]))
+        ; this leads to re-evaluations and doesn't work as expected for variables
+        ; TODO test that
+        (define v-rand (eval rand empty-env))
+        (v-rand->v-t-ret v-rand)]
+       [_ (error 'infer "applied non-function: ~a" v-t-rator)])]))
 
 ; Expr Type Context -> Void
-(define (check expr type ctx)
+(define (check expr v-type ctx)
   (match expr
     [`(lambda (,x) ,body)
-     (match type
-       [`(-> ,t-x ,t-body)
-        (check body t-body (hash-set ctx x t-x))]
+     (match v-type
+       [`(pi ,v-t-x ,v-x->v-t-ret)
+        ; pass a neutral x to the function
+        ; kind of weird. can this break?
+        ; TODO test that
+        (check body (v-x->v-t-ret x) (hash-set ctx x v-t-x))]
        [_ (error 'check "mismatch. expected a function type")])]
     [_
      (define t-infer (infer expr ctx))
-     (unless (equal? type t-infer) (error 'check "mismatch"))]))
+     (unless (same-value? v-type t-infer) (error 'check "mismatch"))]))
 
-; Type Context -> Void
-; make sure a type is well-formed in the context
-(define (check-type type ctx)
-  (match type
-    [(? symbol? type)
-     (define kind (hash-ref ctx type (lambda () (error 'check-type "type variable not found in context"))))
-     (unless (eq? kind '*) (error 'check-type "type not well-formed"))]
-    [`(-> ,t-arg ,t-ret)
-     (check-type t-arg ctx)
-     (check-type t-ret ctx)]))
+(define (same-value? v-t1 v-t2)
+  (equal? (quote-value v-t1)
+          (quote-value v-t2)))
 
 (module+ test
+  (define ctx (hasheq 'Bool '* 'true 'Bool 'false 'Bool))
   (check-equal? (eval 'x empty-env) 'x)
   (check-equal? (eval 'x (hasheq 'x 'y)) 'y)
   (check-equal? (normalize '(lambda (x) x)) '(lambda (_.0) _.0))
   (check-equal? (eval '((lambda (x) x) y) empty-env) 'y)
-  (check-equal? (infer 'x (hasheq 'a '* 'x 'a)) 'a)
-  (check-equal? (check 'x 'a (hasheq 'a '* 'x 'a)) (void))
-  (check-equal? (check '(lambda (x) x) '(-> a a) empty-ctx) (void))
-  (check-equal? (infer '(: (lambda (x) x) (-> a a)) (hasheq 'a '*)) '(-> a a))
-  (check-equal? (infer '((: (lambda (x) x) (-> a a)) y) (hasheq 'a '* 'y 'a)) 'a)
+  (check-equal? (infer 'true ctx) 'Bool)
+  (check-equal? (check 'true 'Bool ctx) (void))
+  (check-equal? (check '(lambda (x) x) (list 'pi 'Bool (const 'Bool)) ctx) (void))
+  (check-equal? (quote-value
+                 (infer '(: (lambda (x) x)
+                            (forall (: x Bool) Bool))
+                        ctx))
+                '(forall (: _.0 Bool) Bool))
+  (check-equal? (infer '((: (lambda (x) x) (forall (: x Bool) Bool)) true) ctx) 'Bool)
   (check-equal? (infer '(((: (lambda (x) (lambda (y) x))
-                             (-> a (-> b a)))
+                             (forall (: x a) (forall (: y b) a)))
                           i)
                          j)
                        (hasheq 'a '*
                                'b '*
                                'i 'a
                                'j 'b))
-                'a))
+                'a)
+  ; identity function for bools
+  (check-equal? (infer '(((: (lambda (a) (lambda (x) x))
+                             (forall (: a *) (forall (: x a) a)))
+                          Bool)
+                         true)
+                       ctx)
+                'Bool)
+  (check-equal? (check '(: (lambda (a) (lambda (x) x))
+                           (forall (: a *) (forall (: x a) a)))
+                       (list 'pi '* (lambda (a) (list 'pi a (lambda (x) a))))
+                       empty-ctx)
+                (void)))
