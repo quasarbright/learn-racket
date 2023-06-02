@@ -10,6 +10,7 @@
 ; (lambda (symbol ...) ((: symbol Type) ...) Expr)
 ; (Expr (Type ...) (Expr ...)) (application)
 ; (let ([x Expr]) Expr)
+; (letrec ([(: x Type) Expr] ...) Expr)
 
 ; A Type is one of
 ; symbol (type variable)
@@ -59,6 +60,11 @@
                  ([var vars] [expr exprs])
          ; use old ctx the whole time
          (context-extend ctx^ var (infer-type expr ctx))))
+     (infer-type body ctx^)]
+    [`(letrec ([(: ,vars ,var-types) ,exprs] ...) ,body)
+     (define ctx^ (context-extend* ctx vars var-types))
+     (for ([expr exprs] [type var-types])
+       (check-type expr type ctx^))
      (infer-type body ctx^)]
     [`(,function ,type-args ,args)
      (define function-type (infer-type function ctx))
@@ -149,4 +155,10 @@
                                             (lambda (b) ((: y b)) x))])
                                (const (Bool) (true)))
                             ctx)
-                '(forall (b) (b) Bool)))
+                '(forall (b) (b) Bool))
+  (check-equal? (infer-type '(letrec ([(: loop (forall (a) () a))
+                                       (lambda (a) ()
+                                         (loop (a) ()))])
+                               (loop ((forall (c d) (c) d)) ()))
+                            ctx)
+                '(forall (c d) (c) d)))
