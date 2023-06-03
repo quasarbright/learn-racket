@@ -1,7 +1,15 @@
 #lang racket
 
-; implementation of https://www.cis.upenn.edu/~bcpierce/papers/lti-toplas.pdf
-; I modified it to use type equality instead of subtyping and got rid of Top, Bot
+; started as an implementation of https://www.cis.upenn.edu/~bcpierce/papers/lti-toplas.pdf
+; Ended up taking it in a different direction
+
+; features:
+; Higher rank polymorphism
+; recursion
+; algebraic data types
+; requires annotated lambda arguments
+; requires type application on function applications
+; naive structural type equality
 
 (module+ test (require rackunit))
 
@@ -16,11 +24,40 @@
 ; (case Expr [(symbol symbol ...) Expr] ...)                        (case)
 ;   Ex: (case (Zero () ()) [(Zero) (Zero ())] [(Succ n) n])
 ; (: Expr Type)                                                     (annotation)
+; Examples
+#;(((lambda (a b) ((: x a) (: y b)))
+    [Bool (List Bool)]
+    (True [])
+    (Empty [Bool]))
+
+   (let ([id (lambda [a] ((: x a)) x)])
+     (id [Bool] (True [])))
+
+   (letrec ([(: loop (forall [a] () a))
+             (lambda [a] () (loop [a]))])
+     (loop [Void]))
+
+   (let-data ((List a) (Empty) (Cons a (List a)))
+             ; list tail function
+             (lambda [a] ((: lst (List a)))
+               (case lst
+                 [(Empty) (Empty [])]
+                 [(Cons ele lst) lst]))))
 
 ; A Type is one of
 ; symbol (type variable)
 ; (forall (symbol ...) (Type ...) Type)   (polymorphic function type)
 ; (symbol Type ...)                       (data type application)
+
+; Examples
+#;(; polymorphic identity function
+   (forall [a] (a) a)
+
+   ; const function, higher rank polymorphism
+   (forall [a] (a) (forall [b] (b) a))
+
+   ; polymorphic list type
+   (List a))
 
 ; A Context is a
 (struct context [type-vars var-types data-defs] #:transparent)
@@ -46,11 +83,9 @@
 ; Type Type -> Void
 ; Assert the two types are equal
 (define (unify low high)
-  ; ignore low high. that's from when this used to be a subtyping function
+  ; ignore names low and high. that's from when this used to be a subtyping function
   (match* (low high)
     [(low high) #:when (equal? low high) (void)]
-    ; TODO this won't think (forall (a) (a) a) is a subtype of (forall (a b) (a) b)
-    ; doesn't matter because no longer a subtype function
     [(`(forall ,t-vars-low ,t-args-low ,t-ret-low)
       `(forall ,t-vars-high ,t-args-high ,t-ret-high))
      (unless (equal? t-vars-low t-vars-high)
@@ -59,7 +94,6 @@
        (error 'unify "function types have different numbers of arguments"))
      (for ([t-arg-low t-args-low]
            [t-arg-high t-args-high])
-       ; contravariant twist. not anymore
        (unify t-arg-high t-arg-low))
      (unify t-ret-low t-ret-high)]
     [(`(,name-high . ,type-args-high) `(,name-low ,type-args-low))
@@ -72,6 +106,8 @@
        (unify type-arg-low type-arg-high))]
     [(_ _) (error 'unify "type mismatch: ~a ~a" low high)]))
 
+; (listof Type) -> Void
+; assert all types are equal
 (define (unify* types)
   (match types
     [(list* low high types)
