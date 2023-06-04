@@ -367,10 +367,10 @@
                 '(forall [a] ((Void)) a)))
 
 ; An Environment is a
-(struct environment [var-values] #:transparent)
+(struct environment [frames] #:transparent)
 ; where
-; var-values is a (hash symbol? Value) representing the values of variables
-(define empty-env (environment (hasheq)))
+; frames is a (listof (hash symbol? Value)) representing "stack frames" where the first one gets priority
+(define empty-env (environment (list)))
 
 ; A Value is one of
 (struct data-value [constructor-name fields] #:transparent)
@@ -387,19 +387,23 @@
      (lambda args
        ; should be impossible after type checking
        (unless (= (length args) (length arg-names))
-         (error 'eval "arity error (at runtime)"))
+         (error 'eval "arity error (at runtime): expected ~a arguments, but got ~a" (length arg-names) (length args)))
        (eval body (environment-extend* env arg-names args)))]
     [`(let ([,xs ,exprs] ...) ,body)
      (define exprs^ (for/list ([expr exprs]) (eval expr env)))
      (eval body (environment-extend* env xs exprs^))]
-    [`(letrec ([(: ,xs ,_) ,exprs^] ...) ,body) 'todo]
+    [`(letrec ([(: ,xs ,_) ,exprs] ...) ,body)
+     (define env^ (environment-extend* env xs (for/list ([x xs]) 'undefined)))
+     (define vals (for/list ([expr exprs]) (eval expr env^)))
+     (environment-set-frame! env^ xs vals)
+     (eval body env^)]
     [`(let-data (,name (,constructor-names ,field-namess ...) ...) ,body)
      (define constructor-values
        (for/list ([constructor-name constructor-names]
                   [field-names field-namess])
          (lambda fields
            (unless (= (length field-names) (length fields))
-             (error 'eval "arity error (at runtime)"))
+             (error 'eval "arity error (at runtime): ~a expected ~a arguments, but got ~a" constructor-name (length field-names) (length fields)))
            (data-value constructor-name fields))))
      (eval body (environment-extend* env constructor-names constructor-values))]
     [`(case ,scrutinee [(,constructor-names . ,field-var-namess) ,bodies] ...)
@@ -422,17 +426,24 @@
        (error 'eval "applied non-procedure"))
      (apply fun^ (for/list ([arg args]) (eval arg env)))]))
 
+; pushes a new frame
 (define (environment-extend* env vars vals)
-  (for/fold ([env env])
-            ([var vars]
-             [val vals])
-    (environment-extend env var val)))
-
-(define (environment-extend env var val)
-  (struct-copy environment env [var-values (hash-set (environment-var-values env) var val)]))
+  (struct-copy environment env [frames (cons (make-hasheq (map cons vars vals)) (environment-frames env))]))
 
 (define (environment-lookup env var)
-  (hash-ref (environment-var-values env) var (lambda () (error 'environment-lookup "unbound var (at runtime): ~a" var))))
+  (if (null? (environment-frames env))
+      (error 'environment-lookup "unbound var (at runtime): ~a" var)
+      (hash-ref (first (environment-frames env)) var (lambda () (environment-lookup (environment-pop-frame env) var)))))
+
+; assumes non-null frames
+(define (environment-pop-frame env)
+  (struct-copy environment env [frames (rest (environment-frames env))]))
+
+; assumes non-null frames
+(define (environment-set-frame! env vars vals)
+  (for ([var vars]
+        [val vals])
+    (hash-set! (first (environment-frames env)) var val)))
 
 (module+ test
   (define (eval-test expr)
@@ -445,4 +456,21 @@
   (check-equal? (eval-test '(case (Succ [] (Zero []))
                               [(Zero) (Succ [] (Zero []))]
                               [(Succ n) (Succ [] (Succ [] n))]))
-                (eval-test '(Succ [] (Succ [] (Zero []))))))
+                (eval-test '(Succ [] (Succ [] (Zero [])))))
+  (check-equal? (eval-test '(letrec ([(: even? (forall [] ((Nat)) (Bool)))
+                                      (lambda [] ((: n (Nat)))
+                                        (case n
+                                          [(Zero) (True [])]
+                                          [(Succ n) (not [] (odd? [] n))]))]
+                                     [(: odd? (forall [] ((Nat)) (Bool)))
+                                      (lambda [] ((: n (Nat)))
+                                        (case n
+                                          [(Zero) (False [])]
+                                          [(Succ n) (not [] (even? [] n))]))]
+                                     [(: not (forall [] ((Bool)) (Bool)))
+                                      (lambda [] ((: b (Bool)))
+                                        (case b
+                                          [(False) (True [])]
+                                          [(True) (False [])]))])
+                              (even? [] (Succ [] (Succ [] (Zero []))))))
+                (eval-test '(True []))))
