@@ -115,6 +115,7 @@
 
 ; Expr Context -> Type
 (define (infer-type expr ctx)
+  (define (bad-syntax) (error "bad syntax: ~a" expr))
   (match expr
     [(? symbol?) (context-lookup ctx expr)]
     [`(lambda ,type-arg-names ((: ,arg-names ,arg-types) ...) ,body)
@@ -124,6 +125,7 @@
                        arg-types))
      (define body-type (infer-type body ctx^))
      `(forall ,type-arg-names ,arg-types ,body-type)]
+    [(cons 'lambda _) (bad-syntax)]
     [`(let ([,vars ,exprs] ...) ,body)
      (define ctx^
        (for/fold ([ctx^ ctx])
@@ -131,11 +133,13 @@
          ; use old ctx the whole time
          (context-extend ctx^ var (infer-type expr ctx))))
      (infer-type body ctx^)]
+    [(cons 'let _) (bad-syntax)]
     [`(letrec ([(: ,vars ,var-types) ,exprs] ...) ,body)
      (define ctx^ (context-extend* ctx vars var-types))
      (for ([expr exprs] [type var-types])
        (check-type expr type ctx^))
      (infer-type body ctx^)]
+    [(cons 'letrec _) (bad-syntax)]
     [`(let-data ((,name . ,type-arg-names) (,constructor-names . ,variant-field-typess) ...) ,body)
      (define variants
        (for/list ([constructor-name constructor-names]
@@ -150,6 +154,7 @@
                         constructor-names
                         constructor-types))
      (infer-type body ctx^)]
+    [(cons 'let-data _) (bad-syntax)]
     [`(case ,scrutinee
         [(,constructor-names . ,field-varss) ,bodies] ...)
      (define scrutinee-type (infer-type scrutinee ctx))
@@ -174,9 +179,11 @@
          (infer-type body ctx^)))
      (unify* body-types)
      (first body-types)]
+    [(cons 'case _) (bad-syntax)]
     [`(: ,expr ,type)
      (check-type expr type ctx)
      type]
+    [(cons ': _) (bad-syntax)]
     [`(,function ,type-args . ,args)
      (define function-type (infer-type function ctx))
      (match function-type
@@ -407,6 +414,7 @@
                  #:when (equal? pattern-constructor-name scrutinee-constructor-name))
        ; assume correct number of fields
        (eval body (environment-extend* env field-var-names (data-value-fields scrutinee^))))]
+    [`(: ,expr ,_) (eval expr env)]
     [`(,fun ,_ . ,args)
      (define fun^ (eval fun env))
      ; should be impossible after type checking
