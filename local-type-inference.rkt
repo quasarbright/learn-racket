@@ -17,12 +17,10 @@
 ; symbol                                                            (variable)
 ; (lambda (symbol ...) ((: symbol Type) ...) Expr)
 ; (Expr (Type ...) Expr ...)                                        (application)
-; (let ([x Expr] ...) Expr)
-; (letrec ([(: x Type) Expr] ...) Expr)
+; (let ([x Expr] ...) Expr)                                         (variable binding)
+; (letrec ([(: x Type) Expr] ...) Expr)                             (recursive variable binding)
 ; (let-data ((symbol symbol ...) (symbol Type ...) ...) Expr)       (data definition)
-;   Ex: (let-data ((Nat) (Zero) (Succ Nat)) (Zero []))
 ; (case Expr [(symbol symbol ...) Expr] ...)                        (case)
-;   Ex: (case (Zero () ()) [(Zero) (Zero ())] [(Succ n) n])
 ; (: Expr Type)                                                     (annotation)
 ; Examples
 #;(((lambda (a b) ((: x a) (: y b)))
@@ -360,3 +358,83 @@
                                          (: (case never) a)))
                             empty-ctx)
                 '(forall [a] ((Void)) a)))
+
+; An Environment is a
+(struct environment [var-values] #:transparent)
+; where
+; var-values is a (hash symbol? Value) representing the values of variables
+(define empty-env (environment (hasheq)))
+
+; A Value is one of
+(struct data-value [constructor-name fields] #:transparent)
+; where
+; constructor is a symbol
+; fields is a (listof Value)
+; (Value ... -> Value)
+
+; Expr Environment -> Value
+(define (eval expr env)
+  (match expr
+    [(? symbol?) (environment-lookup env expr)]
+    [`(lambda ,_ ((: ,arg-names ,_) ...) ,body)
+     (lambda args
+       ; should be impossible after type checking
+       (unless (= (length args) (length arg-names))
+         (error 'eval "arity error (at runtime)"))
+       (eval body (environment-extend* env arg-names args)))]
+    [`(let ([,xs ,exprs] ...) ,body)
+     (define exprs^ (for/list ([expr exprs]) (eval expr env)))
+     (eval body (environment-extend* env xs exprs^))]
+    [`(letrec ([(: ,xs ,_) ,exprs^] ...) ,body) 'todo]
+    [`(let-data (,name (,constructor-names ,field-namess ...) ...) ,body)
+     (define constructor-values
+       (for/list ([constructor-name constructor-names]
+                  [field-names field-namess])
+         (lambda fields
+           (unless (= (length field-names) (length fields))
+             (error 'eval "arity error (at runtime)"))
+           (data-value constructor-name fields))))
+     (eval body (environment-extend* env constructor-names constructor-values))]
+    [`(case ,scrutinee [(,constructor-names . ,field-var-namess) ,bodies] ...)
+     (define scrutinee^ (eval scrutinee env))
+     (unless (data-value? scrutinee^)
+       (error 'eval "case on non-data (at runtime)"))
+     (define scrutinee-constructor-name (data-value-constructor-name scrutinee^))
+     ; assume at least one constructor matches
+     (for/first ([pattern-constructor-name constructor-names]
+                 [field-var-names field-var-namess]
+                 [body bodies]
+                 #:when (equal? pattern-constructor-name scrutinee-constructor-name))
+       ; assume correct number of fields
+       (eval body (environment-extend* env field-var-names (data-value-fields scrutinee^))))]
+    [`(,fun ,_ . ,args)
+     (define fun^ (eval fun env))
+     ; should be impossible after type checking
+     (unless (procedure? fun^)
+       (error 'eval "applied non-procedure"))
+     (apply fun^ (for/list ([arg args]) (eval arg env)))]))
+
+(define (environment-extend* env vars vals)
+  (for/fold ([env env])
+            ([var vars]
+             [val vals])
+    (environment-extend env var val)))
+
+(define (environment-extend env var val)
+  (struct-copy environment env [var-values (hash-set (environment-var-values env) var val)]))
+
+(define (environment-lookup env var)
+  (hash-ref (environment-var-values env) var (lambda () (error 'environment-lookup "unbound var (at runtime): ~a" var))))
+
+(module+ test
+  (define (eval-test expr)
+    (eval `(let-data ((Bool) (True) (False))
+                     (let-data ((List a) (Empty) (Cons a (List a)))
+                               (let-data ((Nat) (Zero) (Succ Nat))
+                                         ,expr)))
+          empty-env))
+  (check-equal? (eval-test '((lambda [] () (True [])) (False []))) (data-value 'True '()))
+  (check-equal? (eval-test '(case (Succ [] (Zero []))
+                              [(Zero) (Succ [] (Zero []))]
+                              [(Succ n) (Succ [] (Succ [] n))]))
+                (eval-test '(Succ [] (Succ [] (Zero []))))))
