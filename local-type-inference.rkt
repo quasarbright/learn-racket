@@ -13,52 +13,77 @@
 
 (module+ test (require rackunit))
 
+; TODO
+; simple type classes
+; type subclasses
+; instances that require constraints like (Eq a) => (Eq (List a))
+; higher kinded types
+; higher kinded type classes, like Functor
+
+;;; left off about to add constraints to all the lambdas
+;;; so far just making examples fit the new syntax, no real implementation
+
 ; An Expr is one of
-; symbol                                                            (variable)
-; (lambda (symbol ...) ((: symbol Type) ...) Expr)
-; (Expr (Type ...) Expr ...)                                        (application)
-; (let ([x Expr] ...) Expr)                                         (variable binding)
-; (letrec ([(: x Type) Expr] ...) Expr)                             (recursive variable binding)
-; (let-data ((symbol symbol ...) (symbol Type ...) ...) Expr)       (data definition)
-; (case Expr [(symbol symbol ...) Expr] ...)                        (case)
-; (: Expr Type)                                                     (annotation)
+; symbol                                                                (variable)
+; (lambda [symbol ...] [(symbol Type) ...] ((: symbol Type) ...) Expr)  (anonymous function)
+; (Expr (Type ...) Expr ...)                                            (application)
+; (let ([x Expr] ...) Expr)                                             (variable binding)
+; (letrec ([(: x Type) Expr] ...) Expr)                                 (recursive variable binding)
+; (let-data ((symbol symbol ...) (symbol Type ...) ...) Expr)           (data definition)
+; (case Expr [(symbol symbol ...) Expr] ...)                            (case)
+; (: Expr Type)                                                         (annotation)
+; (let-type-class ((symbol symbol) (: symbol Type) ...) Expr)           (type class definition)
+; (let-instance ((symbol Type) [symbol Expr] ...) Expr)                 (type class implementation/instance definition)
 ; Examples
-#;(((lambda (a b) ((: x a) (: y b)))
+#;(((lambda (a b) [] ((: x a) (: y b)))
     [Bool (List Bool)]
     (True [])
     (Empty [Bool]))
 
-   (let ([id (lambda [a] ((: x a)) x)])
+   (let ([id (lambda [a] [] ((: x a)) x)])
      (id [Bool] (True [])))
 
-   (letrec ([(: loop (forall [a] () a))
-             (lambda [a] () (loop [a]))])
+   (letrec ([(: loop (forall [a] [] () a))
+             (lambda [a] [] () (loop [a]))])
      (loop [Void]))
 
    (let-data ((List a) (Empty) (Cons a (List a)))
              ; list tail function
-             (lambda [a] ((: lst (List a)))
+             (lambda [a] [] ((: lst (List a)))
                (case lst
                  [(Empty) (Empty [])]
-                 [(Cons ele lst) lst]))))
+                 [(Cons ele lst) lst])))
+
+   (let-type-class ((Equal? a) (: equal? (forall [] [] (a a) (Bool))))
+                   (let-instance ((Equal? (Bool))
+                                  [equal? (lambda [] [] (a b)
+                                       (case a
+                                         [(True) b]
+                                         [(False) (not [] b)]))])
+                                 (equal? [(Bool)] (True []) (True []))))
+
+   (lambda [a] [(Equal? a)] (a a) (not [] (equal? [a] a a))))
 
 ; A Type is one of
 ; symbol (type variable)
-; (forall (symbol ...) (Type ...) Type)   (polymorphic function type)
-; (symbol Type ...)                       (data type application)
+; (forall [symbol ...] [(symbol Type) ...]  (Type ...) Type)   (polymorphic function type)
+; (symbol Type ...)                                            (data type application)
 
 ; Examples
 #;(; polymorphic identity function
-   (forall [a] (a) a)
+   (forall [a] [] (a) a)
 
    ; const function, higher rank polymorphism
-   (forall [a] (a) (forall [b] (b) a))
+   (forall [a] [] (a) (forall [b] (b) a))
 
    ; polymorphic list type
-   (List a))
+   (List a)
+
+   ; type of equal? (with constraint)
+   (forall [a] [(Equal? a)] (a a) (Bool)))
 
 ; A Context is a
-(struct context [type-vars var-types data-defs] #:transparent)
+(struct context [type-vars var-types data-defs type-class-definitions type-class-instances] #:transparent)
 ; where
 ; type-vars is a (set symbol) representing type variables in scope
 ; var-types is a (hash symbol Type) representing a mapping from term variables to their types
@@ -84,10 +109,20 @@
   ; ignore names low and high. that's from when this used to be a subtyping function
   (match* (low high)
     [(low high) #:when (equal? low high) (void)]
-    [(`(forall ,t-vars-low ,t-args-low ,t-ret-low)
-      `(forall ,t-vars-high ,t-args-high ,t-ret-high))
+    [(`(forall ,t-vars-low ,constraints-low ,t-args-low ,t-ret-low)
+      `(forall ,t-vars-high ,constraints-high ,t-args-high ,t-ret-high))
      (unless (equal? t-vars-low t-vars-high)
        (error 'unify "quantified types have different type arguments: ~a ~a" t-vars-low t-vars-high))
+     (unless (= (length constraints-low) (length constraints-high))
+       (error 'unify "function types have different numbers of constraints"))
+     (for ([constraint-low constraints-low]
+           [constraint-high constraints-high])
+       (match* (constraint-low constraint-high)
+         [(`(,name-low ,type-arg-low) `(,name-high ,type-arg-high))
+          (unless (eq? name-low name-high)
+            (error 'unify "constraint mismatch: ~a ~a" name-low name-high))
+          ; if you go back to subtyping, idk about contravariant twist here
+          (unify type-arg-high type-arg-low)]))
      (unless (= (length t-args-low) (length t-args-high))
        (error 'unify "function types have different numbers of arguments"))
      (for ([t-arg-low t-args-low]
@@ -124,7 +159,7 @@
                        arg-names
                        arg-types))
      (define body-type (infer-type body ctx^))
-     `(forall ,type-arg-names ,arg-types ,body-type)]
+     `(forall ,type-arg-names ,_ ,arg-types ,body-type)]
     [(cons 'lambda _) (bad-syntax)]
     [`(let ([,vars ,exprs] ...) ,body)
      (define ctx^
@@ -148,7 +183,7 @@
      (define def (data-def name type-arg-names variants))
      (define constructor-types
        (for/list ([variant-field-types variant-field-typess])
-         `(forall ,type-arg-names ,variant-field-types (,name . ,type-arg-names))))
+         `(forall ,type-arg-names [] ,variant-field-types (,name . ,type-arg-names))))
      (define ctx^
        (context-extend* (context-add-data-def ctx def)
                         constructor-names
@@ -187,7 +222,7 @@
     [`(,function ,type-args . ,args)
      (define function-type (infer-type function ctx))
      (match function-type
-       [`(forall ,type-arg-names ,arg-types ,return-type)
+       [`(forall ,type-arg-names ,_ ,arg-types ,return-type)
         (unless (= (length type-args)
                    (length type-arg-names))
           (error 'infer-type "type arity error"))
@@ -285,7 +320,7 @@
      (if (eq? type var)
          replacement
          type)]
-    [`(forall ,type-arg-names ,arg-types ,return-type)
+    [`(forall ,type-arg-names ,_ ,arg-types ,return-type)
      (if (member var type-arg-names)
          type
          `(forall ,type-arg-names
@@ -301,7 +336,7 @@
   (define ctx (context (seteq 'Bool) (hasheq 'true 'Bool 'false 'Bool) (hasheq)))
   (check-equal? (infer-type '(: true Bool) ctx) 'Bool)
   (check-equal? (infer-type '(lambda (a) ((: x a)) x) ctx)
-                '(forall (a) (a) a))
+                '(forall (a) [] (a) a))
   (check-equal? (infer-type '((lambda (a) ((: x a)) x)
                               (Bool)
                               true)
@@ -319,13 +354,13 @@
                                             (lambda (b) ((: y b)) x))])
                                (const (Bool) true))
                             ctx)
-                '(forall (b) (b) Bool))
-  (check-equal? (infer-type '(letrec ([(: loop (forall (a) () a))
+                '(forall (b) [] (b) Bool))
+  (check-equal? (infer-type '(letrec ([(: loop (forall (a) [] () a))
                                        (lambda (a) ()
                                          (loop (a)))])
-                               (loop [(forall (c d) (c) d)]))
+                               (loop [(forall (c d) [] (c) d)]))
                             ctx)
-                '(forall (c d) (c) d))
+                '(forall (c d) [] (c) d))
   ; bool data
   (check-equal? (infer-type '(let-data ((Bool) (True) (False))
                                        (True []))
@@ -337,7 +372,7 @@
                                          [(True) (lambda [] () (False []))]
                                          [(False) (lambda [] () (True []))]))
                             empty-ctx)
-                '(forall [] () (Bool)))
+                '(forall [] [] () (Bool)))
   ; bool list empty
   (check-equal? (infer-type '(let-data ((List a) (Empty) (Cons a (List a)))
                                        (Empty [Bool]))
@@ -350,21 +385,21 @@
                 '(List Bool))
   ; map
   (check-equal? (infer-type '(let-data ((List a) (Empty) (Cons a (List a)))
-                                       (letrec ([(: map (forall [a b] ((forall [] (a) b) (List a)) (List b)))
-                                                 (lambda [a b] ((: f (forall [] (a) b)) (: xs (List a)))
+                                       (letrec ([(: map (forall [a b] [] ((forall [] (a) b) (List a)) (List b)))
+                                                 (lambda [a b] ((: f (forall [] [] (a) b)) (: xs (List a)))
                                                    (case xs
                                                      [(Empty) (Empty [b])]
                                                      [(Cons x xs)
                                                       (Cons [b] (f [] x) (map [a b] f xs))]))])
                                          map))
                             empty-ctx)
-                '(forall [a b] ((forall [] (a) b) (List a)) (List b)))
+                '(forall [a b] [] ((forall [] [] (a) b) (List a)) (List b)))
   ; absurd via void
   (check-equal? (infer-type '(let-data ((Void))
                                        (lambda [a] ((: never (Void)))
                                          (: (case never) a)))
                             empty-ctx)
-                '(forall [a] ((Void)) a)))
+                '(forall [a] [] ((Void)) a)))
 
 ; An Environment is a
 (struct environment [frames] #:transparent)
@@ -457,17 +492,17 @@
                               [(Zero) (Succ [] (Zero []))]
                               [(Succ n) (Succ [] (Succ [] n))]))
                 (eval-test '(Succ [] (Succ [] (Zero [])))))
-  (check-equal? (eval-test '(letrec ([(: even? (forall [] ((Nat)) (Bool)))
+  (check-equal? (eval-test '(letrec ([(: even? (forall [] [] ((Nat)) (Bool)))
                                       (lambda [] ((: n (Nat)))
                                         (case n
                                           [(Zero) (True [])]
                                           [(Succ n) (not [] (odd? [] n))]))]
-                                     [(: odd? (forall [] ((Nat)) (Bool)))
+                                     [(: odd? (forall [] [] ((Nat)) (Bool)))
                                       (lambda [] ((: n (Nat)))
                                         (case n
                                           [(Zero) (False [])]
                                           [(Succ n) (not [] (even? [] n))]))]
-                                     [(: not (forall [] ((Bool)) (Bool)))
+                                     [(: not (forall [] [] ((Bool)) (Bool)))
                                       (lambda [] ((: b (Bool)))
                                         (case b
                                           [(False) (True [])]
