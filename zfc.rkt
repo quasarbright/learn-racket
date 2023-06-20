@@ -35,13 +35,13 @@ Some desired properties of the system:
 * Can use theorems in future proofs.
 * Easy to know and configure what axioms are available.
 * Proofs are top-down. Break up the big proposition into smaller propositions.
-* Theories should not need rules, only axioms.
+* Theories should not need rules, only axioms. Rules should be for the underlying logic and proofs.
 * You can prove things in whatever order you want.
 * You don't have to write down an axiom's whole proposition when you use it.
 * Supports axiom schemas.
 * Easy to add axioms and rules. Ideally, user-extensible.
 * Not too much renaming, name collisions aren't an issue, etc.
-* Macros. Maybe use syntax-spec and make this a hosted DSL.
+* Macros. Maybe use syntax-spec and make this a hosted DSL. Careful with name sensitivity and hygiene.
 * Proofs are flat. Don't want deep proof trees with many branches.
 |#
 
@@ -256,4 +256,41 @@ General notes:
 * Do you need a type system? If you have sets, you can accidentally treat a set as a boolean. But good rules won't allow
   such statements to be provable, so it's fine. A little weird though.
 
+Going with the tree style.
+Sketch program for ZFC:
+
+
+
 |#
+#;{
+   (theory
+    zfc
+    (axiom extensionality (forall x (forall y (=> (forall z (<=> (in z x) (in z y))) (= x y)))))
+    (axiom regularity (forall x (exists a (=> (in a x)
+                                              (exists y (and (in y x)
+                                                             (not (exists z (and (in z y) (in z x))))))))))
+    ; NOTE: tentative design for schemas. can take in macros. Messy
+    ; could also just have them use free vars and treat them as a prop lol.
+    (axiom-schema (specification pred) (forall z (exists y (forall x (<=> (in x y) (and (in x z) (pred x z)))))))
+    ...
+    (axiom union (forall F (exists A (forall Y (forall x (=> (and (in x Y) (in Y F)) (in x A)))))))
+    (define-operator (self-union F))
+    (define-macro (self-union? F uF) (forall x (<=> (in x uF) (exists Y (and (in x Y) (in Y F))))))
+    ; can't use union? in axiom bc it's too strict, saying it's THE union instead of a superset.
+    (axiom union-operator (forall F (self-union? F (union F))))
+    ; TODO prove (forall F (exists! uF (self-union? F uF)))
+    (define-operator (singleton x))
+    ; ...
+    (define-operator (pair x y))
+    ; ...
+    (define-operator (succ y))
+    (define-macro (succ? y sy) (self-union? (pair y (singleton y)) sy))
+    (axiom infinity (exists X (and (exists e (and (forall z (not (in z e))) (in e X)))
+                                   (forall y (=> (in y X) (in (succ y) X))))))
+    ...)
+
+(define-macro (empty-set? x) (forall y (not (in y x))))
+
+(theorem empty-exists (exists e (empty-set? x))
+  (forall-inst ))
+}
