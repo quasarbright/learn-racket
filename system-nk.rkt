@@ -180,25 +180,15 @@ The list of inference trees is the sub-proofs
   (check-exn exn:fail?
              (lambda () (check-proof proof-misuse-I))))
 
-(define-syntax-rule
-  (check ctx p tree)
-  (check-proof
-   `(ctx
-     p
-     ,(check/tree tree))))
-(define-syntax-rule
-  (check/tree ((rule arg ...) subtree ...))
-  `((,rule arg ...) ,(check/tree subtree) ...))
-
 (module+ test
   (check-not-exn
    (lambda ()
      ; proof1
-     (check
-      (a b) (and a b)
-      ((andR)
-       ((I))
-       ((I)))))))
+     (check-proof
+      `((a b) (and a b)
+       ((,andR)
+        ((,I))
+        ((,I))))))))
 
 ; ctx |- (or p r)   ctx, q |- s
 ; ----------------------------- =>L
@@ -279,13 +269,13 @@ The list of inference trees is the sub-proofs
   ; modus ponens
   (check-not-exn
    (lambda ()
-     (check
-      (a (=> a b)) b
-      ((CR)
-       ((=>L (=> a b))
-        ((OrR1)
-         ((I)))
-        ((I))))))))
+     (check-proof
+      `((a (=> a b)) b
+       ((,CR)
+        ((,=>L (=> a b))
+         ((,OrR1)
+          ((,I)))
+         ((,I)))))))))
 
 ; InferenceTree -> string?
 (define (inference-tree->latex it)
