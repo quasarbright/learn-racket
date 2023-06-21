@@ -130,6 +130,12 @@ A ProofTree is a (list RuleApplication ProofTree ...)
 which is equivalent to (cons RupleApplication (listof ProofTree))
 Represents the use of a rule and proofs of its sub-judgements
 
+An InferenceTree is a (list Judgement symbol? (listof InferenceTree))
+Representing the completed inference tree followed during a Proof
+The Judgement is the thing that was proven
+The symbol? is the rule name
+The list of inference trees is the sub-proofs
+
 |#
 ; Prove a,b |- (and a b)
 (define proof1
@@ -139,14 +145,14 @@ Represents the use of a rule and proofs of its sub-judgements
      ((,I)) ; prove a
      ((,I))))) ; prove b
 
-; Proof -> Void
+; Proof -> InferenceTree
 ; Check the proof, error if it is not valid.
 (define (check-proof proof)
   (match proof
     [(list ctx p tree)
      (check-proof-tree ctx p tree)]))
 
-; Context Formula ProofTree -> Void
+; Context Formula ProofTree -> InferenceTree
 ; Check that the proof tree proves the formula under the context, error if it doesn't
 (define (check-proof-tree ctx p tree)
   (match tree
@@ -154,10 +160,11 @@ Represents the use of a rule and proofs of its sub-judgements
      (match-define (list (list subcontexts subformulae) ...) (apply rule (list ctx p) args))
      (unless (= (length subtrees) (length subcontexts))
        (error "incorrect number of subproofs"))
-     (for ([ctx subcontexts]
-           [p subformulae]
-           [tree subtrees])
-       (check-proof-tree ctx p tree))]))
+     (list (list ctx p) (object-name rule)
+           (for/list ([ctx subcontexts]
+                      [p subformulae]
+                      [tree subtrees])
+             (check-proof-tree ctx p tree)))]))
 
 (module+ test
   (check-not-exn (lambda () proof1)))
@@ -277,7 +284,45 @@ Represents the use of a rule and proofs of its sub-judgements
         ((OrR1)
          ((I)))
         ((I))))))))
+(check
+      (a (=> a b)) b
+      ((CR)
+       ((=>L (=> a b))
+        ((OrR1)
+         ((I)))
+        ((I)))))
 
-; not very legible
-; TODO render the inference tree!
-; use object-name for rule names
+; InferenceTree -> string?
+(define (inference-tree->latex it)
+  (match it
+    [(list (list ctx p) rule its)
+     (format "\frac{~a \vdash ~a}{~a}"
+             (context->latex ctx)
+             (formula->latex p)
+             (inference-trees->latex its))]))
+
+; string? (listof string?) -> string?
+(define (string-join sep strs)
+  (match strs
+    ['() ""]
+    [(cons str (? cons? strs))
+     (format "~a~a~a"
+             str
+             sep
+             (string-join sep strs))]
+    [(list str) str]))
+
+; (listof InferenceTree) -> string?
+(define (inference-trees->latex its)
+  (string-join " \\quad " (map inference-tree->latex its)))
+
+; Context -> string?
+(define (context->latex ctx)
+  (string-join " , " (map formula->latex ctx)))
+
+; Formula -> string?
+(define (formula->latex p)
+  (match p
+    [(? symbol?) (symbol->string p)]
+    ; TODO
+    ))
