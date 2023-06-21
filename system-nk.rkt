@@ -9,6 +9,7 @@
 ; this might actually be system LK or something, idk.
 
 ; TODO variadic rules for and/or and latex
+; TODO object names for parameterized rules
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -57,26 +58,21 @@
 ; A Judgement is a (list Context Formula)
 ; Representing a formula that may be true under a context
 
-; A Rule is a function that takes in
-; * a Judgement
-; optionally
-; * some Formulae. Like forallL needs to know t
-; and returns
-; (listof Judgement)
+; A Rule is a (Context Formula -> (listof Judgement))
 ; The input judgement is the conclusion that is to be proven.
-; The extra formulae that a rule may expect are used to inform what the outputs must be.
-; This is necessary because it is not always possible to infer output judgements from the input alone, like forallL
+; It takes in the context and the formula as separate arguments for convenience.
 ; The output represents a list of sup-proofs that are necessary to prove the input judgement
 ; A rule is responsible for checking whether it can be applied
+; For rules that need more information, curried functions are used.
 
 ; Example
 ; ctx |- p1   ctx |- p2
 ; ---------------------
 ; ctx |- p1 and p2
 (define andR
-  (lambda (j)
-    (match j
-      [(list ctx `(and ,p1 ,p2))
+  (lambda (ctx p)
+    (match p
+      [`(and ,p1 ,p2)
        (list (list ctx p1)
              (list ctx p2))]
       [_ (error "rule not applicable")])))
@@ -86,25 +82,24 @@
 ; --------
 ; ctx |- p
 (define I
-  (lambda (j)
-    (match j
-      [(list ctx p)
-       (unless (member p ctx)
-         (error 'I "formula not in context ~a ~a" p ctx))
-       '()])))
+  (lambda (ctx p)
+    (unless (member p ctx)
+      (error 'I "formula not in context ~a ~a" p ctx))
+    '()))
 
 ; (forall x p-body) in ctx    ctx,p-body[t/x] |- p
 ; ------------------------------------------------
 ; ctx |- p
 #;
 (define forallL
-  (lambda (j p/forall t)
-    (match* (j p/forall)
-      [((list ctx p) (and p-forall `(forall ,x ,p-body)))
-       (unless (member p-forall ctx)
-         (error "provided forall is not in the context"))
-       (list (cons (subst p-body x t) ctx) p)]
-      [_ (error "rule not applicable")])))
+  (lambda (p-forall t)
+    (lambda (ctx p)
+      (match p/forall
+        [`(forall ,x ,p-body)
+         (unless (member p-forall ctx)
+           (error "provided forall is not in the context"))
+         (list (cons (subst p-body x t) ctx) p)]
+        [_ (error "rule not applicable")]))))
 ; This rule means if you assume a forall, you can "instantiate" it with any term and assume its body
 ; This instantiation uses variable substitution
 ; The rule takes in p/forall so it knows which forall you're talking about, since this is
@@ -124,15 +119,11 @@ for you. The conclusion too.
 A Proof is a
 (list Context Formula ProofTree)
 
-A RuleApplication is a (list RuleProcedure Formula ...)
-Represents an application of a rule procedure with the conclusion judgement implicitly passed in
-The Formula ... are the extra arguments
-
-A ProofTree is a (list RuleApplication ProofTree ...)
+A ProofTree is a (list Rule ProofTree ...)
 which is equivalent to (cons RupleApplication (listof ProofTree))
 Represents the use of a rule and proofs of its sub-judgements
 
-An InferenceTree is a (list Judgement RuleProcedure (listof InferenceTree))
+An InferenceTree is a (list Judgement Rule (listof InferenceTree))
 Representing the completed inference tree followed during a Proof
 The Judgement is the thing that was proven
 The symbol? is the rule name
@@ -143,9 +134,9 @@ The list of inference trees is the sub-proofs
 (define proof1
   `((a b) ; ctx
     (and a b) ; p
-    ((,andR) ; prove (and a b)
-     ((,I)) ; prove a
-     ((,I))))) ; prove b
+    (,andR ; prove (and a b)
+     (,I) ; prove a
+     (,I)))) ; prove b
 
 ; Proof -> InferenceTree
 ; Check the proof, error if it is not valid.
@@ -158,8 +149,8 @@ The list of inference trees is the sub-proofs
 ; Check that the proof tree proves the formula under the context, error if it doesn't
 (define (check-proof-tree ctx p tree)
   (match tree
-    [(cons (list rule args ...) subtrees)
-     (match-define (list (list subcontexts subformulae) ...) (apply rule (list ctx p) args))
+    [(cons rule subtrees)
+     (match-define (list (list subcontexts subformulae) ...) (rule ctx p))
      (unless (= (length subtrees) (length subcontexts))
        (error "incorrect number of subproofs"))
      (list (list ctx p) rule
@@ -174,7 +165,7 @@ The list of inference trees is the sub-proofs
 (define proof-misuse-I
   `((b)
     a
-    ((,I))))
+    (,I)))
 
 (module+ test
   (check-exn exn:fail?
@@ -185,50 +176,49 @@ The list of inference trees is the sub-proofs
    (lambda ()
      ; proof1
      (check-proof
-      `((a b) (and a b)
-       ((,andR)
-        ((,I))
-        ((,I))))))))
+      `((a b)
+        (and a b)
+        (,andR
+         (,I)
+         (,I)))))))
 
 ; ctx |- (or p r)   ctx, q |- s
 ; ----------------------------- =>L
 ; ctx, p=>q |- r or s
 (define =>L
-  (lambda (j impl)
-    (match* (impl j)
-      [(`(=> ,p ,q) (list ctx `(or ,r ,s)))
-       (unless (member `(=> ,p ,q) ctx)
-         (error "implication not in context"))
-       (list (list ctx `(or ,p ,q))
-             (list (cons q ctx) s))]
-      [(_ _) (error "rule not applicable")])))
+  (lambda (impl)
+    (lambda (ctx p)
+      (match* (impl p)
+        [(`(=> ,p ,q) `(or ,r ,s))
+         (unless (member impl ctx)
+           (error "implication not in context"))
+         (list (list ctx `(or ,p ,q))
+               (list (cons q ctx) s))]
+        [(_ _) (error "rule not applicable")]))))
 
 ; ctx |- q  ctx, q |- p
 ; --------------------- cut
 ; ctx |- p
 (define Cut
-  (lambda (j q)
-    (match j
-      [(list ctx p)
-       (list (list ctx q)
-             (list (cons q ctx) p))])))
+  (lambda (q)
+    (lambda (ctx p)
+      (list (list ctx q)
+            (list (cons q ctx) p)))))
 
 ; ctx |- p or p
 ; ------------- CR
 ; ctx |- p
 (define CR
-  (lambda (j)
-    (match j
-      [(list ctx p)
-       (list (list ctx `(or ,p ,p)))])))
+  (lambda (ctx p)
+    (list (list ctx `(or ,p ,p)))))
 
 ; ctx |- p
 ; ------------- OrR1
 ; ctx |- p or q
 (define OrR1
-  (lambda (j)
-    (match j
-      [(list ctx `(or ,p ,_))
+  (lambda (ctx p)
+    (match p
+      [`(or ,p ,_)
        (list (list ctx p))]
       [_ (error "rule not applicable")])))
 
@@ -236,9 +226,9 @@ The list of inference trees is the sub-proofs
 ; ------------- OrR2
 ; ctx |- p or q
 (define OrR2
-  (lambda (j)
-    (match j
-      [(list ctx `(or ,_ ,q))
+  (lambda (ctx p)
+    (match p
+      [`(or ,_ ,q)
        (list (list ctx q))]
       [_ (error "rule not applicable")])))
 
@@ -247,35 +237,33 @@ The list of inference trees is the sub-proofs
 ; Used to view the context and formula to prove.
 ; Can be used for an interactive experience.
 (define Debug
-  (lambda (j [name #f])
-    (match j
-      [(list ctx p)
-       (when name (displayln (format "Debug ~a" name)))
-       (displayln (format "~a |- ~a" ctx p))
-       '()])))
+  (lambda (ctx p)
+    (displayln (format "~a |- ~a" ctx p))
+    '()))
 
 ; -------- TrustMe
 ; ctx |- p
 ; Used when you're lazy!
 (define TrustMe
-  (lambda (j)
-    (match j
-      [(list ctx p)
-       ; so you don't forget that you're using this
-       (displayln "I trust you!")
-       '()])))
+  (lambda (ctx p)
+    ; so you don't forget that you're using this
+    (displayln "I trust you!")
+    '()))
 
 (module+ test
   ; modus ponens
   (check-not-exn
    (lambda ()
      (check-proof
-      `((a (=> a b)) b
-       ((,CR)
-        ((,=>L (=> a b))
-         ((,OrR1)
-          ((,I)))
-         ((,I)))))))))
+      `((a (=> a b))
+        b
+        (,CR
+         (,(=>L '(=> a b))
+          (,OrR1
+           (,I))
+          (,I))))))))
+
+; latex
 
 ; InferenceTree -> string?
 (define (inference-tree->latex it)
@@ -320,10 +308,11 @@ The list of inference trees is the sub-proofs
 #;
 (displayln
   (inference-tree->latex
-  (check
-   (a (=> a b)) b
-   ((CR)
-    ((=>L (=> a b))
-     ((OrR1)
-      ((I)))
-     ((I)))))))
+  (check-proof
+   `((a (=> a b))
+     b
+     (,CR
+      (,(=>L '(=> a b))
+       (,OrR1
+        (,I))
+       (,I)))))))
