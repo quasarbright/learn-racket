@@ -8,6 +8,8 @@
 ; a checker for proofs in system NK (see https://en.wikipedia.org/wiki/Sequent_calculus)
 ; this might actually be system LK or something, idk.
 
+; TODO variadic rules for and/or and latex
+
 ; A Formula is one of
 ; symbol?                            variable
 ; (not Formula)                      negation
@@ -130,7 +132,7 @@ A ProofTree is a (list RuleApplication ProofTree ...)
 which is equivalent to (cons RupleApplication (listof ProofTree))
 Represents the use of a rule and proofs of its sub-judgements
 
-An InferenceTree is a (list Judgement symbol? (listof InferenceTree))
+An InferenceTree is a (list Judgement RuleProcedure (listof InferenceTree))
 Representing the completed inference tree followed during a Proof
 The Judgement is the thing that was proven
 The symbol? is the rule name
@@ -160,7 +162,7 @@ The list of inference trees is the sub-proofs
      (match-define (list (list subcontexts subformulae) ...) (apply rule (list ctx p) args))
      (unless (= (length subtrees) (length subcontexts))
        (error "incorrect number of subproofs"))
-     (list (list ctx p) (object-name rule)
+     (list (list ctx p) rule
            (for/list ([ctx subcontexts]
                       [p subformulae]
                       [tree subtrees])
@@ -284,22 +286,16 @@ The list of inference trees is the sub-proofs
         ((OrR1)
          ((I)))
         ((I))))))))
-(check
-      (a (=> a b)) b
-      ((CR)
-       ((=>L (=> a b))
-        ((OrR1)
-         ((I)))
-        ((I)))))
 
 ; InferenceTree -> string?
 (define (inference-tree->latex it)
   (match it
     [(list (list ctx p) rule its)
-     (format "\frac{~a \vdash ~a}{~a}"
+     (format "\\frac{\\displaystyle ~a}{\\displaystyle ~a \\ \\vdash \\ ~a} ~a"
+             (inference-trees->latex its)
              (context->latex ctx)
              (formula->latex p)
-             (inference-trees->latex its))]))
+             (object-name rule))]))
 
 ; string? (listof string?) -> string?
 (define (string-join sep strs)
@@ -314,7 +310,7 @@ The list of inference trees is the sub-proofs
 
 ; (listof InferenceTree) -> string?
 (define (inference-trees->latex its)
-  (string-join " \\quad " (map inference-tree->latex its)))
+  (string-join " \\qquad " (map inference-tree->latex its)))
 
 ; Context -> string?
 (define (context->latex ctx)
@@ -324,5 +320,20 @@ The list of inference trees is the sub-proofs
 (define (formula->latex p)
   (match p
     [(? symbol?) (symbol->string p)]
-    ; TODO
-    ))
+    [`(not ,p) (format "(\\neg ~a)" (formula->latex p))]
+    [`(and ,p ,q) (format "(~a \\wedge ~a)" (formula->latex p) (formula->latex q))]
+    [`(or ,p ,q) (format "(~a \\vee ~a)" (formula->latex p) (formula->latex q))]
+    [`(=> ,p ,q) (format "(~a \\rightarrow ~a)" (formula->latex p) (formula->latex q))]
+    [`(forall ,x ,p) (format "(\\forall ~a . ~a)" (formula->latex x) (formula->latex p))]
+    [`(exists ,x ,p) (format "(\\exists ~a . ~a)" (formula->latex x) (formula->latex p))]))
+
+#;
+(displayln
+  (inference-tree->latex
+  (check
+   (a (=> a b)) b
+   ((CR)
+    ((=>L (=> a b))
+     ((OrR1)
+      ((I)))
+     ((I)))))))
