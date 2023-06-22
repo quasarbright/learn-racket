@@ -9,7 +9,6 @@
 ; this might actually be system LK or something, idk.
 
 ; TODO variadic rules for and/or and latex
-; TODO object names for parameterized rules
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -64,42 +63,53 @@
 ; The output represents a list of sup-proofs that are necessary to prove the input judgement
 ; A rule is responsible for checking whether it can be applied
 ; For rules that need more information, curried functions are used.
+;
+(struct rule [proc name]
+  #:property prop:object-name (lambda (rul) (rule-name rul))
+  #:property prop:procedure (lambda (rul) (rule-proc rul)))
+
+(define-syntax define-rule
+  (syntax-rules ()
+    [(_ (name ctx p) body ...)
+     (define (name ctx p) body ...)]
+    [(_ ((name . args) ctx p) body ...)
+     (define (name . args)
+       (rule (lambda (ctx p)
+               body
+               ...)
+             'name))]))
 
 ; Example
 ; ctx |- p1   ctx |- p2
 ; ---------------------
 ; ctx |- p1 and p2
-(define andR
-  (lambda (ctx p)
-    (match p
-      [`(and ,p1 ,p2)
-       (list (list ctx p1)
-             (list ctx p2))]
-      [_ (error "rule not applicable")])))
+(define-rule (andR ctx p)
+  (match p
+    [`(and ,p1 ,p2)
+     (list (list ctx p1)
+           (list ctx p2))]
+    [_ (error "rule not applicable")]))
 ; This rule means to prove p1 and p2, you must supply a proof for p1 and a proof for p2
 
 ; p in ctx
 ; --------
 ; ctx |- p
-(define I
-  (lambda (ctx p)
-    (unless (member p ctx)
-      (error 'I "formula not in context ~a ~a" p ctx))
-    '()))
+(define-rule (I ctx p)
+  (unless (member p ctx)
+    (error 'I "formula not in context ~a ~a" p ctx))
+  '())
 
 ; (forall x p-body) in ctx    ctx,p-body[t/x] |- p
 ; ------------------------------------------------
 ; ctx |- p
 #;
-(define forallL
-  (lambda (p-forall t)
-    (lambda (ctx p)
-      (match p/forall
-        [`(forall ,x ,p-body)
-         (unless (member p-forall ctx)
-           (error "provided forall is not in the context"))
-         (list (cons (subst p-body x t) ctx) p)]
-        [_ (error "rule not applicable")]))))
+(define-rule ((forallL p-forall t) ctx p)
+  (match p/forall
+    [`(forall ,x ,p-body)
+     (unless (member p-forall ctx)
+       (error "provided forall is not in the context"))
+     (list (cons (subst p-body x t) ctx) p)]
+    [_ (error "rule not applicable")]))
 ; This rule means if you assume a forall, you can "instantiate" it with any term and assume its body
 ; This instantiation uses variable substitution
 ; The rule takes in p/forall so it knows which forall you're talking about, since this is
@@ -185,70 +195,61 @@ The list of inference trees is the sub-proofs
 ; ctx |- (or p r)   ctx, q |- s
 ; ----------------------------- =>L
 ; ctx, p=>q |- r or s
-(define =>L
-  (lambda (impl)
-    (lambda (ctx p)
-      (match* (impl p)
-        [(`(=> ,p ,q) `(or ,r ,s))
-         (unless (member impl ctx)
-           (error "implication not in context"))
-         (list (list ctx `(or ,p ,q))
-               (list (cons q ctx) s))]
-        [(_ _) (error "rule not applicable")]))))
+(define-rule ((=>L impl) ctx p)
+  (match* (impl p)
+    [(`(=> ,p ,q) `(or ,r ,s))
+     (unless (member impl ctx)
+       (error "implication not in context"))
+     (list (list ctx `(or ,p ,q))
+           (list (cons q ctx) s))]
+    [(_ _) (error "rule not applicable")]))
 
 ; ctx |- q  ctx, q |- p
 ; --------------------- cut
 ; ctx |- p
-(define Cut
-  (lambda (q)
-    (lambda (ctx p)
-      (list (list ctx q)
-            (list (cons q ctx) p)))))
+(define-rule ((Cut q) ctx p)
+  (list (list ctx q)
+        (list (cons q ctx) p)))
 
 ; ctx |- p or p
 ; ------------- CR
 ; ctx |- p
-(define CR
-  (lambda (ctx p)
-    (list (list ctx `(or ,p ,p)))))
+(define-rule (CR ctx p)
+  (list (list ctx `(or ,p ,p))))
 
 ; ctx |- p
 ; ------------- OrR1
 ; ctx |- p or q
-(define OrR1
-  (lambda (ctx p)
-    (match p
-      [`(or ,p ,_)
-       (list (list ctx p))]
-      [_ (error "rule not applicable")])))
+(define-rule (OrR1 ctx p)
+  (match p
+    [`(or ,p ,_)
+     (list (list ctx p))]
+    [_ (error "rule not applicable")]))
 
 ; ctx |- q
 ; ------------- OrR2
 ; ctx |- p or q
-(define OrR2
-  (lambda (ctx p)
-    (match p
-      [`(or ,_ ,q)
-       (list (list ctx q))]
-      [_ (error "rule not applicable")])))
+(define-rule (OrR2 ctx p)
+  (match p
+    [`(or ,_ ,q)
+     (list (list ctx q))]
+    [_ (error "rule not applicable")]))
 
 ; -------- Debug
 ; ctx |- p
 ; Used to view the context and formula to prove.
 ; Can be used for an interactive experience.
-(define Debug
-  (lambda (ctx p)
-    (displayln (format "~a |- ~a" ctx p))
-    '()))
+(define-rule (Debug ctx p)
+  (displayln (format "~a |- ~a" ctx p))
+  '())
 
 ; -------- TrustMe
 ; ctx |- p
 ; Used when you're lazy!
-(define TrustMe
-  (lambda (ctx p)
-    ; so you don't forget that you're using this
-    (displayln "I trust you!")
-    '()))
+(define-rule (TrustMe ctx p)
+  ; so you don't forget that you're using this
+  (displayln "I trust you!")
+  '())
 
 (module+ test
   ; modus ponens
@@ -262,6 +263,13 @@ The list of inference trees is the sub-proofs
           (,OrR1
            (,I))
           (,I))))))))
+
+(define-rule ((ModusPonens p q) ctx r)
+  (unless (member `(=> ,p ,q) ctx)
+    (error "rule not applicable, implication not in ctx"))
+  (unless (member p ctx)
+    (error "rule not applicable, antecedent not in ctx"))
+  (list (list (cons q ctx) r)))
 
 ; latex
 
