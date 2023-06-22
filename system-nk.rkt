@@ -67,14 +67,18 @@
 ;
 (struct rule [proc name]
   #:property prop:object-name (lambda (rul) (rule-name rul))
-  #:property prop:procedure (lambda (rul) (rule-proc rul)))
+  #:property prop:procedure (lambda (rul . args) (apply (rule-proc rul) args)))
 
 (define-syntax define-rule
   (syntax-rules ()
-    [(_ (name ctx p) body ...)
-     (define (name ctx p) body ...)]
     [(_ ((name . args) ctx p) body ...)
      (define (name . args)
+       (rule (lambda (ctx p)
+               body
+               ...)
+             'name))]
+    [(_ (name ctx p) body ...)
+     (define name
        (rule (lambda (ctx p)
                body
                ...)
@@ -129,9 +133,10 @@ for you. The conclusion too.
 A Proof is a
 (list Context Formula ProofTree)
 
-A ProofTree is a (list Rule ProofTree ...)
+A ProofTree is a (list Rule ProofTree ...) or Rule
 which is equivalent to (cons RupleApplication (listof ProofTree))
 Represents the use of a rule and proofs of its sub-judgements
+In the Rule case, it's shorthand for (list rul)
 
 An InferenceTree is a (list Judgement Rule (listof InferenceTree))
 Representing the completed inference tree followed during a Proof
@@ -145,8 +150,8 @@ The list of inference trees is the sub-proofs
   `((a b) ; ctx
     (and a b) ; p
     (,andR ; prove (and a b)
-     (,I) ; prove a
-     (,I)))) ; prove b
+     ,I ; prove a
+     ,I))) ; prove b
 
 ; Proof -> InferenceTree
 ; Check the proof, error if it is not valid.
@@ -159,6 +164,9 @@ The list of inference trees is the sub-proofs
 ; Check that the proof tree proves the formula under the context, error if it doesn't
 (define (check-proof-tree ctx p tree)
   (match tree
+    [(? rule? rul)
+     ; using a rule by itself like I is the same as (list I)
+     (check-proof-tree ctx p (list rul))]
     [(cons rule subtrees)
      (match-define (list (list subcontexts subformulae) ...) (rule ctx p))
      (unless (= (length subtrees) (length subcontexts))
@@ -175,7 +183,7 @@ The list of inference trees is the sub-proofs
 (define proof-misuse-I
   `((b)
     a
-    (,I)))
+    ,I))
 
 (module+ test
   (check-exn exn:fail?
@@ -189,8 +197,8 @@ The list of inference trees is the sub-proofs
       `((a b)
         (and a b)
         (,andR
-         (,I)
-         (,I)))))))
+         ,I
+         ,I))))))
 
 ; ctx |- (or p r)   ctx, q |- s
 ; ----------------------------- =>L
@@ -261,20 +269,19 @@ The list of inference trees is the sub-proofs
         (,CR
          (,(=>L '(=> a b))
           (,OrR1
-           (,I))
-          (,I))))))))
+           ,I)
+          ,I)))))))
 
 ; when you prove a theorem, you can make a rule of it
 
-; ctx, q |- r
 ; ----------------- ModusPonens
-; ctx, p, p->q |- r
-(define-rule ((ModusPonens p q) ctx r)
+; ctx, p, p->q |- q
+(define-rule ((ModusPonens p) ctx q)
   (unless (member `(=> ,p ,q) ctx)
     (error "rule not applicable, implication not in ctx"))
   (unless (member p ctx)
     (error "rule not applicable, antecedent not in ctx"))
-  (list (list (cons q ctx) r)))
+  '())
 
 ; ctx, p-body[y/x] |- p
 ; --------------------------- ExistsL
@@ -332,6 +339,74 @@ The list of inference trees is the sub-proofs
      (for/or ([p ps]) (occurs-bound? x p))]
     [(list (or 'forall 'exists) a p)
      (or (eq? x a) (occurs-free? x p))]))
+
+(define proof-with-cuts
+  `(()
+    b
+    (,(Cut 'a)
+     ,TrustMe
+     (,(Cut '(=> a b))
+      ,TrustMe
+      (,(ModusPonens 'a))))))
+#;
+(module+ test
+  (check-not-exn
+   (lambda ()
+     (check-proof proof-with-cuts))))
+
+; A meta-rule for sequencing cuts
+(define-syntax Cuts
+  (syntax-rules ()
+    [(_ () proof)
+     proof]
+    [(_ ([lemma lemma-proof] pairs ...) proof)
+     (list
+      (Cut lemma)
+      lemma-proof
+      (Cuts (pairs ...) proof))]))
+
+(define proof-with-Cuts
+  `(()
+    b
+    ,(Cuts (['a TrustMe]
+            ['(=> a b) TrustMe])
+       `(,(ModusPonens 'a)))))
+#;
+(module+ test
+  (check-not-exn
+   (lambda ()
+     (check-proof proof-with-Cuts))))
+
+; sequences suproofs. Ex:
+; ...
+; ---------- Rule2
+; ctx2 |- p2
+; ---------- Rule1
+; ctx1 |- p1
+;
+; where the last argument is the final subproof
+; TODO make this a procedure lol
+(define-syntax Sequence
+  (syntax-rules ()
+    [(_ proof) proof]
+    [(_ rule0 rule ...) (list rule0 (Sequence rule ...))]))
+
+(define Branch list)
+
+(module+ test
+  ; modus ponens
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      `((a (=> a b))
+        b
+        ,(Sequence
+          CR
+          (Branch (=>L '(=> a b))
+           (Sequence
+            OrR1
+            I)
+           (Sequence I))))))))
 
 ; latex
 
