@@ -9,6 +9,7 @@
 ; this might actually be system LK or something, idk.
 
 ; TODO variadic rules for and/or and latex
+; TODO extend-context function that flattens (and)
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -263,6 +264,11 @@ The list of inference trees is the sub-proofs
            (,I))
           (,I))))))))
 
+; when you prove a theorem, you can make a rule of it
+
+; ctx, q |- r
+; ----------------- ModusPonens
+; ctx, p, p->q |- r
 (define-rule ((ModusPonens p q) ctx r)
   (unless (member `(=> ,p ,q) ctx)
     (error "rule not applicable, implication not in ctx"))
@@ -368,15 +374,3 @@ The list of inference trees is the sub-proofs
     [`(=> ,p ,q) (format "(~a \\rightarrow ~a)" (formula->latex p) (formula->latex q))]
     [`(forall ,x ,p) (format "(\\forall ~a . ~a)" (formula->latex x) (formula->latex p))]
     [`(exists ,x ,p) (format "(\\exists ~a . ~a)" (formula->latex x) (formula->latex p))]))
-
-#;
-(displayln
-  (inference-tree->latex
-  (check-proof
-   `((a (=> a b))
-     b
-     (,CR
-      (,(=>L '(=> a b))
-       (,OrR1
-        (,I))
-       (,I)))))))
