@@ -102,9 +102,8 @@
 ; (forall x p-body) in ctx    ctx,p-body[t/x] |- p
 ; ------------------------------------------------
 ; ctx |- p
-#;
-(define-rule ((forallL p-forall t) ctx p)
-  (match p/forall
+(define-rule ((ForallL p-forall t) ctx p)
+  (match p-forall
     [`(forall ,x ,p-body)
      (unless (member p-forall ctx)
        (error "provided forall is not in the context"))
@@ -270,6 +269,63 @@ The list of inference trees is the sub-proofs
   (unless (member p ctx)
     (error "rule not applicable, antecedent not in ctx"))
   (list (list (cons q ctx) r)))
+
+; ctx, p-body[y/x] |- p
+; --------------------------- ExistsL
+; ctx, (exists x p-body) |- p
+(define-rule ((ExistsL p-exists y) ctx p)
+  (match p-exists
+    [`(exists ,x ,p-body)
+     (when (or (occurs-free? y p) (occurs-free?/context y ctx))
+       (error "cannot instantiate existential with a variable that occurs free in lower sequents"))
+     (list (cons (subst p-body x y)) p)]
+    [_ (error "rule not applicable")]))
+
+; ctx |- p-body[y/x]
+; ------------------------ ForallR
+; ctx |- (forall x p-body)
+(define-rule ((ForallR y) ctx p)
+  (match p
+    [`(forall ,x ,p-body)
+     ; important to use p. x = y can be ok
+     (when (or (occurs-free? y p) (occurs-free?/context y ctx))
+       (error "cannot instantiate forall with a variable that occurs free in lower sequents"))
+     (list ctx (subst p-body x y))]
+    [_ (error "rule not applicable")]))
+
+; Formula symbol? Formula -> Formula
+; p[replacement/x]
+(define (subst p x replacement)
+  (match p
+    [(? symbol?)
+     (if (eq? p x) replacement p)]
+    [(cons (and op (or 'or 'and '=> 'not)) ps)
+     (cons op (for/list ([p ps]) (subst p x replacement)))]
+    [(list (and quantifier (or 'forall 'exists)) a body)
+     (if (eq? x a) p (list quantifier a (subst body x replacement)))]))
+
+; symbol? Context -> boolean?
+(define (occurs-free?/context x ctx)
+  (for/or ([p ctx]) (occurs-free? x p)))
+
+; symbol? Formula -> boolean?
+(define (occurs-free? x p)
+  (match p
+    [(? symbol?)
+     (eq? x p)]
+    [(cons (or 'or 'and '=> 'not) ps)
+     (for/or ([p ps]) (occurs-free? x p))]
+    [(list (or 'forall 'exists) a p)
+     (and (not (eq? x a)) (occurs-free? x p))]))
+
+; symbol? Formula -> boolean?
+(define (occurs-bound? x p)
+  (match p
+    [(? symbol?) #f]
+    [(cons (or 'or 'and '=> 'not) ps)
+     (for/or ([p ps]) (occurs-bound? x p))]
+    [(list (or 'forall 'exists) a p)
+     (or (eq? x a) (occurs-free? x p))]))
 
 ; latex
 
