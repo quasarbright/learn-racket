@@ -8,6 +8,10 @@
 ; a checker for proofs in system NK (see https://en.wikipedia.org/wiki/Sequent_calculus)
 ; this might actually be system LK or something, idk.
 
+; This module is roughly laid out in the  order I developed it.
+; So initially, we write proofs as raw data. But then we implement macros and use those.
+; TODO once you're done, move this into a separate repo and organize it
+
 ; TODO variadic rules for and/or and latex
 ; TODO extend-context function that flattens (and)
 ; TODO bottom
@@ -17,8 +21,10 @@
 ; TODO compound terms for theories
 ; TODO syntax-spec frontend!
 ; TODO proof shape validation or something for better errors
-; TODO a way to define "shortcut" rules like ModusPonens USING a proof. Like define the rule using other rules.
-; Like how NotR is literally =>R. Maybe combinators? Or an alternative to check-proof that just outputs the judgements?
+; TODO make it so the proof for a checked rule only runs once on generics,
+; not every time you use it.
+; TODO de-gensym when printing, but still avoid name conflicts
+; TODO pass auto to curried rule and have it grab the first thing that fits
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -207,20 +213,23 @@ The list of inference trees is the sub-proofs
     [(`(=> ,p ,q) `(or ,r ,s))
      (unless (member impl ctx)
        (error "implication not in context"))
-     (list (list ctx `(or ,p ,q))
+     (list (list ctx `(or ,p ,r))
            (list (cons q ctx) s))]
     [(_ _) (error '=>L^ "rule not applicable. Did you forget an or?")]))
 
 ; ctx |- (or p r)    ctx, q |- r
 ; ------------------------------ =>L
 ; ctx, p=>q |- r
+; TODO just make top left p. If you could prove r with ctx, you wouldn't
+; use this
 (define-rule ((=>L impl) ctx r)
   (match impl
     [`(=> ,p ,q)
      (unless (member impl ctx)
        (error '=>L "implication not in context"))
      (list (list ctx `(or ,p ,r))
-           (list (cons q ctx) r))]))
+           (list (cons q ctx) r))]
+    [_ (error '=>L "rule not applicable")]))
 
 ; ctx |- q  ctx, q |- p
 ; --------------------- cut
@@ -582,11 +591,11 @@ The list of inference trees is the sub-proofs
   (check-not-exn
    (lambda ()
      (check-proof
-      (list (exists (x y) (and x y))) (exists z z)
+      (list (exists (x y) (conj x y))) (exists z z)
       (ExistsL*
-       ([(exists (x y) (and x y)) w]
+       ([(exists (x y) (conj x y)) w]
         ; notice how you have access to w here
-        [(exists y (and w y)) w])
+        [(exists y (conj w y)) w])
        (Sequence
         AndL
         (ExistsR w)
@@ -776,7 +785,101 @@ The list of inference trees is the sub-proofs
     (error 'NotL "negation not found in context"))
   (list (list ctx p)))
 
+; checked rules
+
+; For a "shortcut" rule like ModusPonens which isn't technically needed,
+; it's safe to add a rule for it if you accompany the rule with an equivalent proof.
+; Checked rules allow you to construct a rule like ModusPonens USING a proof.
+; This way, rules are either intro/elim for new constructs and thus axiomatic,
+; or verified shortcuts for proofs in terms of other rules.
+
+; Fake rule used in checked rules to defer subproofs to the user of the checked rule.
+(define-rule (Defer ctx p) (error 'Defer "cannot use in a regular proof"))
+
+; Context Formula ProofTree -> (listof Judgement)
+; like check-proof, but accumulates deferred subproofs
+; Useful for defining checked rules.
+; TODO what is the equivalent to this across the curry howard isomorphism?
+(define (check-proof/defer ctx p tree)
+  ; TODO grab this from the inference tree instead?
+  ; this is duplicated code
+  (match tree
+    [(== Defer eq?) (list (list ctx p))]
+    [(? rule? rul)
+     ; using a rule by itself like I is the same as (list I)
+     (check-proof/defer ctx p (list rul))]
+    [(cons rule subtrees)
+     (match-define (list (list subcontexts subformulae) ...) (rule ctx p))
+     (unless (= (length subtrees) (length subcontexts))
+       (error 'check-rule "incorrect number of subproofs. Expected ~a, given ~a. Rule: ~a" (length subcontexts) (length subtrees) rule))
+     (apply append
+            (for/list ([ctx subcontexts]
+                       [p subformulae]
+                       [tree subtrees])
+              (check-proof/defer ctx p tree)))]))
+
+; --------------- CheckedModusPonens
+; ctx,p,p=>q |- q
+(define-rule ((CheckedModusPonens p) ctx q)
+  (unless (member `(=> ,p ,q) ctx)
+    (error 'ModusPonens "rule not applicable, implication not in ctx"))
+  (unless (member p ctx)
+    (error 'ModusPonens "rule not applicable, antecedent not in ctx"))
+  (check-proof/defer
+   ctx q
+   (Branch
+    (=>L (=> p q))
+    (Sequence OrR1 I)
+    I)))
+
+(module+ test
+  (fresh (p q)
+         (check-equal? ((CheckedModusPonens p) (list p (=> p q)) q)
+                       '())))
+
+; TODO checked cut?
+
+; ctx |- (or p r)    ctx, q |- r
+; ------------------------------ =>L
+; ctx, p=>q |- r
+(define-rule ((Checked=>L impl) ctx r)
+  (match impl
+    [`(=> ,p ,q)
+     (unless (member impl ctx)
+       (error '=>L "implication not in context"))
+     (check-proof/defer
+      ctx r
+      (Sequence
+       CR
+       (Branch
+        (=>L^ (=> p q))
+        Defer
+        Defer)))]
+    [_ (error 'Checked=>L "rule not applicable")]))
+
+(module+ test
+  ; TODO test other rules in this way
+  (fresh (p q r)
+         (define ctx (list (=> p q)))
+         (check-equal? ((Checked=>L (=> p q))
+                        ctx r)
+                       (list (list ctx (disj p r))
+                             (list (cons q ctx) r))))
+  ; modus ponens using checked =>L
+  (check-not-exn
+   (lambda ()
+     (fresh
+      (p q)
+      (check-proof
+       (list p (=> p q)) q
+       (Branch
+        (Checked=>L (=> p q))
+        (Sequence OrR1 I)
+        I))))))
+
 ; latex
+
+; TODO check-proof/latex that checks it and returns a pict!
 
 ; InferenceTree -> string?
 (define (inference-tree->latex it)
