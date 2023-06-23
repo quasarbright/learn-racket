@@ -14,7 +14,6 @@
 
 ; TODO variadic rules for and/or and latex
 ; TODO extend-context function that flattens (and)
-; TODO bottom
 ; TODO what programs do these proofs correspond to?
 ; TODO make a branch and reformulate everything in terms of forall and => lol
 ; TODO pattern expanders for formulae?
@@ -217,17 +216,15 @@ The list of inference trees is the sub-proofs
            (list (cons q ctx) s))]
     [(_ _) (error '=>L^ "rule not applicable. Did you forget an or?")]))
 
-; ctx |- (or p r)    ctx, q |- r
-; ------------------------------ =>L
+; ctx |- p    ctx, q |- r
+; ----------------------- =>L
 ; ctx, p=>q |- r
-; TODO just make top left p. If you could prove r with ctx, you wouldn't
-; use this
 (define-rule ((=>L impl) ctx r)
   (match impl
     [`(=> ,p ,q)
      (unless (member impl ctx)
        (error '=>L "implication not in context"))
-     (list (list ctx `(or ,p ,r))
+     (list (list ctx p)
            (list (cons q ctx) r))]
     [_ (error '=>L "rule not applicable")]))
 
@@ -731,9 +728,7 @@ The list of inference trees is the sub-proofs
         ([(exists x (neg (= x x))) x])
         (Branch
          (=>L (neg (= x x)))
-         (Sequence
-          OrR1
-          =R)
+         =R
          BottomL))))))
   ; dual of proof by contradiction just for fun
   (check-not-exn
@@ -771,9 +766,7 @@ The list of inference trees is the sub-proofs
         AndL
         (Branch
          (=>L (neg p))
-         (Sequence
-          OrR1
-          I)
+         I
          BottomL)))))))
 
 ; ctx, (not p) |- p
@@ -829,7 +822,7 @@ The list of inference trees is the sub-proofs
    ctx q
    (Branch
     (=>L (=> p q))
-    (Sequence OrR1 I)
+    I
     I)))
 
 (module+ test
@@ -839,8 +832,8 @@ The list of inference trees is the sub-proofs
 
 ; TODO checked cut?
 
-; ctx |- (or p r)    ctx, q |- r
-; ------------------------------ =>L
+; ctx |- p    ctx, q |- r
+; ----------------------- =>L
 ; ctx, p=>q |- r
 (define-rule ((Checked=>L impl) ctx r)
   (match impl
@@ -853,7 +846,7 @@ The list of inference trees is the sub-proofs
        CR
        (Branch
         (=>L^ (=> p q))
-        Defer
+        (Sequence OrR1 Defer)
         Defer)))]
     [_ (error 'Checked=>L "rule not applicable")]))
 
@@ -863,7 +856,7 @@ The list of inference trees is the sub-proofs
          (define ctx (list (=> p q)))
          (check-equal? ((Checked=>L (=> p q))
                         ctx r)
-                       (list (list ctx (disj p r))
+                       (list (list ctx p)
                              (list (cons q ctx) r))))
   ; modus ponens using checked =>L
   (check-not-exn
@@ -874,7 +867,7 @@ The list of inference trees is the sub-proofs
        (list p (=> p q)) q
        (Branch
         (Checked=>L (=> p q))
-        (Sequence OrR1 I)
+        I
         I))))))
 
 ; latex
@@ -898,7 +891,7 @@ The list of inference trees is the sub-proofs
     [(cons str (? cons? strs))
      (format "~a~a~a"
              str
-             sep
+             sep
              (string-join sep strs))]
     [(list str) str]))
 
