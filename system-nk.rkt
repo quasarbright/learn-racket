@@ -16,6 +16,9 @@
 ; TODO pattern expanders for formulae?
 ; TODO compound terms for theories
 ; TODO syntax-spec frontend!
+; TODO proof shape validation or something for better errors
+; TODO a way to define "shortcut" rules like ModusPonens USING a proof. Like define the rule using other rules.
+; Like how NotR is literally =>R. Maybe combinators? Or an alternative to check-proof that just outputs the judgements?
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -723,7 +726,29 @@ The list of inference trees is the sub-proofs
           OrR1
           =R)
          BottomL))))))
-  ; TODO do dual proof and compare structure!
+  ; dual of proof by contradiction just for fun
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      ; there does not exists something that is not equal to itself
+      '() (forall x (= x x))
+      (ForallR*
+       (x)
+       =R))))
+  ; proof by contradiction with NotR
+  ; Pretty much the same thing with two nots!
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      ; there does not exists something that is not equal to itself
+      '() (neg (exists x (neg (= x x))))
+      (Sequence
+       NotR
+       (ExistsL*
+        ([(exists x (neg (= x x))) x])
+        (Sequence
+         (NotL (= x x))
+         =R))))))
   ; contradiction theorem
   (check-not-exn
    (lambda ()
