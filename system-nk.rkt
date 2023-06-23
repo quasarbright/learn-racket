@@ -10,7 +10,7 @@
 
 ; TODO variadic rules for and/or and latex
 ; TODO extend-context function that flattens (and)
-; TODO equality
+; TODO bottom
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -20,11 +20,11 @@
 ; (=> Formula Formula)               implication
 ; (forall symbol? Formula)           universal quantification
 ; (exists symbol? Formula)           existential quantification
+; (= symbol? symbol?)                equality
 ;
 ; for later:
 ; (<=> Formula Formula)              bidirectional implication
 ; (exists! symbol? Formula)          unique existential quantification
-; (= symbol? symbol?)                equality
 ; (symbol? symbol? ...)              operator from a theory
 
 ; A Context is a (listof Formula) representing formulae that are assumed to be true
@@ -305,7 +305,7 @@ The list of inference trees is the sub-proofs
   (match p
     [(? symbol?)
      (if (eq? p x) replacement p)]
-    [(cons (and op (or 'or 'and '=> 'not)) ps)
+    [(cons (and op (or 'or 'and '=> 'not '=)) ps)
      (cons op (for/list ([p ps]) (subst p x replacement)))]
     [(list (and quantifier (or 'forall 'exists)) a body)
      (if (eq? x a) p (list quantifier a (subst body x replacement)))]))
@@ -319,7 +319,7 @@ The list of inference trees is the sub-proofs
   (match p
     [(? symbol?)
      (eq? x p)]
-    [(cons (or 'or 'and '=> 'not) ps)
+    [(cons (or 'or 'and '=> 'not '=) ps)
      (for/or ([p ps]) (occurs-free? x p))]
     [(list (or 'forall 'exists) a p)
      (and (not (eq? x a)) (occurs-free? x p))]))
@@ -328,7 +328,7 @@ The list of inference trees is the sub-proofs
 (define (occurs-bound? x p)
   (match p
     [(? symbol?) #f]
-    [(cons (or 'or 'and '=> 'not) ps)
+    [(cons (or 'or 'and '=> 'not '=) ps)
      (for/or ([p ps]) (occurs-bound? x p))]
     [(list (or 'forall 'exists) a p)
      (or (eq? x a) (occurs-free? x p))]))
@@ -575,6 +575,49 @@ The list of inference trees is the sub-proofs
         AndL
         (ExistsR w)
         I))))))
+
+; equality
+
+; shadows number =, but whatever
+(define-syntax-rule (= t1 t2) (list '= t1 t2))
+
+; ctx |- p[t2/t1]
+; --------------- =L
+; ctx,t1=t2 |- p
+; handles symmetry automatically
+(define-rule ((=L target replacement) ctx p)
+  (unless (or (member (= target replacement) ctx)
+              (member (= target replacement) ctx))
+    (error '=L "couldn't find equality in context"))
+  ; TODO subst a term with a term once you have (= Formula Formula)
+  (list (list ctx (subst p target replacement))))
+
+; ------------ =R
+; ctx |- t = t
+; Refl
+(define-rule (=R ctx p)
+  (match p
+    [`(= ,p ,q)
+     (unless (equal? p q)
+       (error '=R "terms are not equal: ~a vs ~a" p q))
+     '()]
+    [_ (error '=R "rule not applicable")]))
+
+(module+ test
+  ; transitive property of equality
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      '() (forall (a b c) (=> (conj (= a b) (= b c))
+                              (= a c)))
+      (ForallR*
+       (a b c)
+       (Sequence
+        =>R
+        AndL
+        (=L a b)
+        (=L b c)
+        =R))))))
 
 ; latex
 
