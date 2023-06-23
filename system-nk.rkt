@@ -11,10 +11,14 @@
 ; TODO variadic rules for and/or and latex
 ; TODO extend-context function that flattens (and)
 ; TODO bottom
+; TODO what programs do these proofs correspond to?
+; TODO make a branch and reformulate everything in terms of forall and => lol
+; TODO pattern expanders for formulae?
+; TODO compound terms for theories
+; TODO syntax-spec frontend!
 
 ; A Formula is one of
 ; symbol?                            variable
-; (not Formula)                      negation
 ; (and Formula ...)                  conjunction
 ; (or Formula ...)                   disjunction
 ; (=> Formula Formula)               implication
@@ -23,8 +27,6 @@
 ; (= symbol? symbol?)                equality
 ;
 ; for later:
-; (<=> Formula Formula)              bidirectional implication
-; (exists! symbol? Formula)          unique existential quantification
 ; (symbol? symbol? ...)              operator from a theory
 
 ; A Context is a (listof Formula) representing formulae that are assumed to be true
@@ -194,16 +196,28 @@ The list of inference trees is the sub-proofs
        ,I)))))
 
 ; ctx |- (or p r)   ctx, q |- s
-; ----------------------------- =>L
+; ----------------------------- =>L^
 ; ctx, p=>q |- r or s
-(define-rule ((=>L impl) ctx p)
+; included for completeness. Annoying to use
+(define-rule ((=>L^ impl) ctx p)
   (match* (impl p)
     [(`(=> ,p ,q) `(or ,r ,s))
      (unless (member impl ctx)
        (error "implication not in context"))
      (list (list ctx `(or ,p ,q))
            (list (cons q ctx) s))]
-    [(_ _) (error '=>L "rule not applicable. Did you forget an or?")]))
+    [(_ _) (error '=>L^ "rule not applicable. Did you forget an or?")]))
+
+; ctx |- (or p r)    ctx, q |- r
+; ------------------------------ =>L
+; ctx, p=>q |- r
+(define-rule ((=>L impl) ctx r)
+  (match impl
+    [`(=> ,p ,q)
+     (unless (member impl ctx)
+       (error '=>L "implication not in context"))
+     (list (list ctx `(or ,p ,r))
+           (list (cons q ctx) r))]))
 
 ; ctx |- q  ctx, q |- p
 ; --------------------- cut
@@ -260,7 +274,7 @@ The list of inference trees is the sub-proofs
       '(a (=> a b))
       'b
       `(,CR
-        (,(=>L '(=> a b))
+        (,(=>L^ '(=> a b))
          (,OrR1
           ,I)
          ,I))))))
@@ -305,7 +319,7 @@ The list of inference trees is the sub-proofs
   (match p
     [(? symbol?)
      (if (eq? p x) replacement p)]
-    [(cons (and op (or 'or 'and '=> 'not '=)) ps)
+    [(cons (and op (or 'or 'and '=> '=)) ps)
      (cons op (for/list ([p ps]) (subst p x replacement)))]
     [(list (and quantifier (or 'forall 'exists)) a body)
      (if (eq? x a) p (list quantifier a (subst body x replacement)))]))
@@ -319,7 +333,7 @@ The list of inference trees is the sub-proofs
   (match p
     [(? symbol?)
      (eq? x p)]
-    [(cons (or 'or 'and '=> 'not '=) ps)
+    [(cons (or 'or 'and '=> '=) ps)
      (for/or ([p ps]) (occurs-free? x p))]
     [(list (or 'forall 'exists) a p)
      (and (not (eq? x a)) (occurs-free? x p))]))
@@ -328,7 +342,7 @@ The list of inference trees is the sub-proofs
 (define (occurs-bound? x p)
   (match p
     [(? symbol?) #f]
-    [(cons (or 'or 'and '=> 'not '=) ps)
+    [(cons (or 'or 'and '=> '=) ps)
      (for/or ([p ps]) (occurs-bound? x p))]
     [(list (or 'forall 'exists) a p)
      (or (eq? x a) (occurs-free? x p))]))
@@ -395,7 +409,7 @@ The list of inference trees is the sub-proofs
       'b
       (Sequence
        CR
-       (Branch (=>L '(=> a b))
+       (Branch (=>L^ '(=> a b))
                (Sequence
                 OrR1
                 I)
@@ -406,7 +420,6 @@ The list of inference trees is the sub-proofs
 (define-syntax-rule (disj p q) (list 'or p q))
 (define-syntax-rule (conj p q) (list 'and p q))
 (define-syntax-rule (=> p q) (list '=> p q))
-(define-syntax-rule (neg p) (list 'not p))
 ; don't really need fresh for binder, right?
 ; I think you'd still need free var checks if you do this idk.
 (define-syntax forall
@@ -432,7 +445,7 @@ The list of inference trees is the sub-proofs
        (list a (=> a b)) b
        (Sequence
         CR
-        (Branch (=>L (=> a b))
+        (Branch (=>L^ (=> a b))
                 (Sequence
                  OrR1
                  I)
@@ -490,7 +503,7 @@ The list of inference trees is the sub-proofs
         AndL
         CR
         (Branch
-         (=>L (=> p q))
+         (=>L^ (=> p q))
          (Sequence
           OrR1
           I)
@@ -557,7 +570,7 @@ The list of inference trees is the sub-proofs
         AndL
         CR
         (Branch
-         (=>L (=> p q))
+         (=>L^ (=> p q))
          (Sequence
           OrR1
           I)
@@ -619,6 +632,125 @@ The list of inference trees is the sub-proofs
         (=L b c)
         =R))))))
 
+; formula macros
+
+; bidirectional implication
+(define-syntax-rule (<=> p q) (conj (=> p q) (=> q p)))
+; unique existence
+(define-syntax-rule (exists! x p y)
+  (begin
+    ; this is only necessary because we perform substitution on p
+    (when (occurs-free? y p)
+      (error 'exists! "universally quantified variable must not be free in formula"))
+    (exists x (forall y (<=> (subst p x y) (= x y))))))
+; can be used to prove anything, impossible to prove (without itself or equivalent)
+(define bottom (forall a a))
+; logical negation
+(define-syntax-rule (neg p) (=> p bottom))
+; useless as an assumption (except to prove itself), can always be proven
+(define top (exists a a))
+
+(module+ test
+  ; absurd
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      '() (forall p (=> bottom p))
+      (ForallR*
+       (p)
+       (Sequence
+        =>R
+        (ForallL bottom p)
+        I)))))
+  ; dual of absurd, idk what you'd call it
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      '() (forall p (=> p top))
+      (ForallR*
+       (p)
+       (Sequence
+        =>R
+        (ExistsR p)
+        I))))))
+
+; --------------- BottomL
+; ctx,bottom |- p
+(define-rule (BottomL ctx p)
+  (unless (member bottom ctx)
+    (error 'BottomL "bottom not in context"))
+  '())
+
+; ---------- TopR
+; ctx |- top
+; ctx must not be empty
+(define-rule (TopR ctx p)
+  (unless (equal? p top)
+    (error 'TopR "rule not applicable"))
+  ; do you really need this?
+  (when (null? ctx)
+    (error 'TopR "contex is empty"))
+  '())
+
+; ctx |- p and (not p)
+; -------------------- BottomR
+; ctx |- bottom
+; contradiction
+#;
+(define-rule (BottomR))
+
+; ctx p |- bottom
+; --------------- NotR
+; ctx |- (not p)
+(define-rule (NotR ctx p) (=>R ctx p))
+
+
+(module+ test
+  ; proof by contradiction
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      ; there does not exists something that is not equal to itself
+      '() (neg (exists x (neg (= x x))))
+      (Sequence
+       =>R
+       ; assume there does exist such a thing
+       (ExistsL*
+        ([(exists x (neg (= x x))) x])
+        (Branch
+         (=>L (neg (= x x)))
+         (Sequence
+          OrR1
+          =R)
+         BottomL))))))
+  ; TODO do dual proof and compare structure!
+  ; contradiction theorem
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      '() (forall (p q) (=> (conj p (neg p))
+                            q))
+      (ForallR*
+       (p q)
+       (Sequence
+        =>R
+        AndL
+        (Branch
+         (=>L (neg p))
+         (Sequence
+          OrR1
+          I)
+         BottomL)))))))
+
+; ctx, (not p) |- p
+; ----------------- NotL
+; ctx, (not p) |- q
+; proof by contradiction
+(define-rule ((NotL p) ctx q)
+  (unless (member (neg p) ctx)
+    (error 'NotL "negation not found in context"))
+  (list (list ctx p)))
+
 ; latex
 
 ; InferenceTree -> string?
@@ -653,6 +785,7 @@ The list of inference trees is the sub-proofs
 ; Formula -> string?
 (define (formula->latex p)
   (match p
+    ; TODO bottom, top, re-sugar neg?
     [(? symbol?) (symbol->string p)]
     [`(not ,p) (format "(\\neg ~a)" (formula->latex p))]
     [`(and ,p ,q) (format "(~a \\wedge ~a)" (formula->latex p) (formula->latex q))]
