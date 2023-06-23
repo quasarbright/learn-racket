@@ -12,13 +12,13 @@
 ; So initially, we write proofs as raw data. But then we implement macros and use those.
 ; TODO once you're done, move this into a separate repo and organize it
 
+; TODO compound terms for theories
+; TODO syntax-spec frontend!
 ; TODO variadic rules for and/or and latex
 ; TODO extend-context function that flattens (and)
 ; TODO what programs do these proofs correspond to?
 ; TODO make a branch and reformulate everything in terms of forall and => lol
 ; TODO pattern expanders for formulae?
-; TODO compound terms for theories
-; TODO syntax-spec frontend!
 ; TODO proof shape validation or something for better errors
 ; TODO make it so the proof for a checked rule only runs once on generics,
 ; not every time you use it.
@@ -616,7 +616,6 @@ The list of inference trees is the sub-proofs
 
 ; ------------ =R
 ; ctx |- t = t
-; Refl
 (define-rule (=R ctx p)
   (match p
     [`(= ,p ,q)
@@ -787,37 +786,38 @@ The list of inference trees is the sub-proofs
 ; or verified shortcuts for proofs in terms of other rules.
 
 ; Fake rule used in checked rules to defer subproofs to the user of the checked rule.
-(define-rule (Defer ctx p) (error 'Defer "cannot use in a regular proof"))
+; Don't use this in regular proofs
+; TODO prevent use during regular proofs with a parameter
+(define currently-deferring? (make-parameter #f))
+(define-rule (Defer ctx p)
+  (unless (currently-deferring?)
+    (error 'Defer "do not use this during a normal proof"))
+  '())
 
 ; Context Formula ProofTree -> (listof Judgement)
 ; like check-proof, but accumulates deferred subproofs
 ; Useful for defining checked rules.
 ; TODO what is the equivalent to this across the curry howard isomorphism?
 (define (check-proof/defer ctx p tree)
-  ; TODO grab this from the inference tree instead?
-  ; this is duplicated code
+  (define inference-tree (parameterize ([currently-deferring? #t])
+                           (check-proof ctx p tree)))
+  (get-deferred-judgements inference-tree))
+
+; InferenceTree
+(define (get-deferred-judgements tree)
   (match tree
-    [(== Defer eq?) (list (list ctx p))]
-    [(? rule? rul)
-     ; using a rule by itself like I is the same as (list I)
-     (check-proof/defer ctx p (list rul))]
-    [(cons rule subtrees)
-     (match-define (list (list subcontexts subformulae) ...) (rule ctx p))
-     (unless (= (length subtrees) (length subcontexts))
-       (error 'check-rule "incorrect number of subproofs. Expected ~a, given ~a. Rule: ~a" (length subcontexts) (length subtrees) rule))
-     (apply append
-            (for/list ([ctx subcontexts]
-                       [p subformulae]
-                       [tree subtrees])
-              (check-proof/defer ctx p tree)))]))
+    [(list j (== Defer eq?) '())
+     (list j)]
+    [(list _ _ subtrees)
+     (apply append (map get-deferred-judgements subtrees))]))
 
 ; --------------- CheckedModusPonens
 ; ctx,p,p=>q |- q
 (define-rule ((CheckedModusPonens p) ctx q)
   (unless (member `(=> ,p ,q) ctx)
-    (error 'ModusPonens "rule not applicable, implication not in ctx"))
+    (error 'CheckedModusPonens "rule not applicable, implication not in ctx"))
   (unless (member p ctx)
-    (error 'ModusPonens "rule not applicable, antecedent not in ctx"))
+    (error 'CheckedModusPonens "rule not applicable, antecedent not in ctx"))
   (check-proof/defer
    ctx q
    (Branch
