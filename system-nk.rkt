@@ -9,8 +9,8 @@
 ; this might actually be system LK or something, idk.
 
 ; TODO variadic rules for and/or and latex
-; TODO multi forall and exists. tbh just sugar over singles
 ; TODO extend-context function that flattens (and)
+; TODO equality
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -409,8 +409,18 @@ The list of inference trees is the sub-proofs
 (define-syntax-rule (neg p) (list 'not p))
 ; don't really need fresh for binder, right?
 ; I think you'd still need free var checks if you do this idk.
-(define-syntax-rule (forall x p) (let ([x 'x]) (list 'forall x p)))
-(define-syntax-rule (exists x p) (let ([x 'x]) (list 'exists x p)))
+(define-syntax forall
+  (syntax-rules ()
+    [(_ () p) p]
+    [(_ (x0 x ...) p)
+     (let ([x0 'x0]) (list 'forall x0 (forall (x ...) p)))]
+    [(_ x p) (forall (x) p)]))
+(define-syntax exists
+  (syntax-rules ()
+    [(_ () p) p]
+    [(_ (x0 x ...) p)
+     (let ([x0 'x0]) (list 'exists x0 (exists (x ...) p)))]
+    [(_ x p) (exists (x) p)]))
 
 (module+ test
   ; modus ponens
@@ -539,7 +549,7 @@ The list of inference trees is the sub-proofs
   (check-not-exn
    (lambda ()
      (check-proof
-      '() (forall p (forall q (=> (conj p (=> p q)) q)))
+      '() (forall (p q) (=> (conj p (=> p q)) q))
       (ForallR*
        (p q)
        (Sequence
@@ -552,13 +562,13 @@ The list of inference trees is the sub-proofs
           OrR1
           I)
          I))))))
-  ; (exists x p) => (exists y q) if p => q
+  ; (p => q) => ((exists x p) => (exists y q))
   (check-not-exn
    (lambda ()
      (check-proof
-      (list (exists x (exists y (and x y)))) (exists z z)
+      (list (exists (x y) (and x y))) (exists z z)
       (ExistsL*
-       ([(exists x (exists y (and x y))) w]
+       ([(exists (x y) (and x y)) w]
         ; notice how you have access to w here
         [(exists y (and w y)) w])
        (Sequence
