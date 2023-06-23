@@ -9,6 +9,7 @@
 ; this might actually be system LK or something, idk.
 
 ; TODO variadic rules for and/or and latex
+; TODO multi forall and exists. tbh just sugar over singles
 ; TODO extend-context function that flattens (and)
 
 ; A Formula is one of
@@ -88,12 +89,12 @@
 ; ctx |- p1   ctx |- p2
 ; ---------------------
 ; ctx |- p1 and p2
-(define-rule (andR ctx p)
+(define-rule (AndR ctx p)
   (match p
     [`(and ,p1 ,p2)
      (list (list ctx p1)
            (list ctx p2))]
-    [_ (error "rule not applicable")]))
+    [_ (error 'AndR "rule not applicable")]))
 ; This rule means to prove p1 and p2, you must supply a proof for p1 and a proof for p2
 
 ; p in ctx
@@ -112,8 +113,8 @@
     [`(forall ,x ,p-body)
      (unless (member p-forall ctx)
        (error "provided forall is not in the context"))
-     (list (cons (subst p-body x t) ctx) p)]
-    [_ (error "rule not applicable")]))
+     (list (list (cons (subst p-body x t) ctx) p))]
+    [_ (error 'ForallL "rule not applicable")]))
 ; This rule means if you assume a forall, you can "instantiate" it with any term and assume its body
 ; This instantiation uses variable substitution
 ; The rule takes in p/forall so it knows which forall you're talking about, since this is
@@ -149,33 +150,26 @@ The list of inference trees is the sub-proofs
 (define proof1
   `((a b) ; ctx
     (and a b) ; p
-    (,andR ; prove (and a b)
+    (,AndR ; prove (and a b)
      ,I ; prove a
      ,I))) ; prove b
 
-; Proof -> InferenceTree
-; Check the proof, error if it is not valid.
-(define (check-proof proof)
-  (match proof
-    [(list ctx p tree)
-     (check-proof-tree ctx p tree)]))
-
 ; Context Formula ProofTree -> InferenceTree
-; Check that the proof tree proves the formula under the context, error if it doesn't
-(define (check-proof-tree ctx p tree)
+; Check that the proof tree proves the formula to be true under the context
+(define (check-proof ctx p tree)
   (match tree
     [(? rule? rul)
      ; using a rule by itself like I is the same as (list I)
-     (check-proof-tree ctx p (list rul))]
+     (check-proof ctx p (list rul))]
     [(cons rule subtrees)
      (match-define (list (list subcontexts subformulae) ...) (rule ctx p))
      (unless (= (length subtrees) (length subcontexts))
-       (error "incorrect number of subproofs"))
+       (error 'check-proof "incorrect number of subproofs. Expected ~a, given ~a. Rule: ~a" (length subcontexts) (length subtrees) rule))
      (list (list ctx p) rule
            (for/list ([ctx subcontexts]
                       [p subformulae]
                       [tree subtrees])
-             (check-proof-tree ctx p tree)))]))
+             (check-proof ctx p tree)))]))
 
 (module+ test
   (check-not-exn (lambda () proof1)))
@@ -187,18 +181,17 @@ The list of inference trees is the sub-proofs
 
 (module+ test
   (check-exn exn:fail?
-             (lambda () (check-proof proof-misuse-I))))
+             (lambda () (apply check-proof proof-misuse-I))))
 
 (module+ test
   (check-not-exn
    (lambda ()
      ; proof1
      (check-proof
-      `((a b)
-        (and a b)
-        (,andR
-         ,I
-         ,I))))))
+      '(a b) '(and a b)
+      `(,AndR
+       ,I
+       ,I)))))
 
 ; ctx |- (or p r)   ctx, q |- s
 ; ----------------------------- =>L
@@ -210,7 +203,7 @@ The list of inference trees is the sub-proofs
        (error "implication not in context"))
      (list (list ctx `(or ,p ,q))
            (list (cons q ctx) s))]
-    [(_ _) (error "rule not applicable")]))
+    [(_ _) (error '=>L "rule not applicable. Did you forget an or?")]))
 
 ; ctx |- q  ctx, q |- p
 ; --------------------- cut
@@ -232,7 +225,7 @@ The list of inference trees is the sub-proofs
   (match p
     [`(or ,p ,_)
      (list (list ctx p))]
-    [_ (error "rule not applicable")]))
+    [_ (error 'OrR1 "rule not applicable")]))
 
 ; ctx |- q
 ; ------------- OrR2
@@ -241,7 +234,7 @@ The list of inference trees is the sub-proofs
   (match p
     [`(or ,_ ,q)
      (list (list ctx q))]
-    [_ (error "rule not applicable")]))
+    [_ (error 'OrR2 "rule not applicable")]))
 
 ; -------- Debug
 ; ctx |- p
@@ -264,13 +257,13 @@ The list of inference trees is the sub-proofs
   (check-not-exn
    (lambda ()
      (check-proof
-      `((a (=> a b))
-        b
-        (,CR
-         (,(=>L '(=> a b))
-          (,OrR1
-           ,I)
-          ,I)))))))
+      '(a (=> a b))
+      'b
+      `(,CR
+        (,(=>L '(=> a b))
+         (,OrR1
+          ,I)
+         ,I))))))
 
 ; when you prove a theorem, you can make a rule of it
 
@@ -278,9 +271,9 @@ The list of inference trees is the sub-proofs
 ; ctx, p, p->q |- q
 (define-rule ((ModusPonens p) ctx q)
   (unless (member `(=> ,p ,q) ctx)
-    (error "rule not applicable, implication not in ctx"))
+    (error 'ModusPonens "rule not applicable, implication not in ctx"))
   (unless (member p ctx)
-    (error "rule not applicable, antecedent not in ctx"))
+    (error 'ModusPonens "rule not applicable, antecedent not in ctx"))
   '())
 
 ; ctx, p-body[y/x] |- p
@@ -290,9 +283,9 @@ The list of inference trees is the sub-proofs
   (match p-exists
     [`(exists ,x ,p-body)
      (when (or (occurs-free? y p) (occurs-free?/context y ctx))
-       (error "cannot instantiate existential with a variable that occurs free in lower sequents"))
-     (list (cons (subst p-body x y)) p)]
-    [_ (error "rule not applicable")]))
+       (error 'ExistsL "cannot instantiate existential with a variable that occurs free in lower sequents"))
+     (list (list (cons (subst p-body x y) ctx) p))]
+    [_ (error 'ExistsL "rule not applicable")]))
 
 ; ctx |- p-body[y/x]
 ; ------------------------ ForallR
@@ -303,8 +296,8 @@ The list of inference trees is the sub-proofs
      ; important to use p. x = y can be ok
      (when (or (occurs-free? y p) (occurs-free?/context y ctx))
        (error "cannot instantiate forall with a variable that occurs free in lower sequents"))
-     (list ctx (subst p-body x y))]
-    [_ (error "rule not applicable")]))
+     (list (list ctx (subst p-body x y)))]
+    [_ (error 'ForallR "rule not applicable")]))
 
 ; Formula symbol? Formula -> Formula
 ; p[replacement/x]
@@ -352,7 +345,7 @@ The list of inference trees is the sub-proofs
 (module+ test
   (check-not-exn
    (lambda ()
-     (check-proof proof-with-cuts))))
+     (apply check-proof proof-with-cuts))))
 
 ; A meta-rule for sequencing cuts
 (define-syntax Cuts
@@ -375,7 +368,7 @@ The list of inference trees is the sub-proofs
 (module+ test
   (check-not-exn
    (lambda ()
-     (check-proof proof-with-Cuts))))
+     (apply check-proof proof-with-Cuts))))
 
 ; sequences suproofs. Ex:
 ; ...
@@ -398,15 +391,180 @@ The list of inference trees is the sub-proofs
   (check-not-exn
    (lambda ()
      (check-proof
-      `((a (=> a b))
-        b
-        ,(Sequence
-          CR
-          (Branch (=>L '(=> a b))
-           (Sequence
-            OrR1
-            I)
-           (Sequence I))))))))
+      '(a (=> a b))
+      'b
+      (Sequence
+       CR
+       (Branch (=>L '(=> a b))
+               (Sequence
+                OrR1
+                I)
+               (Sequence I)))))))
+
+; macros for formulae
+(define-syntax-rule (fresh (x ...) body ...) (let ([x (gensym 'x)] ...) body ...))
+(define-syntax-rule (disj p q) (list 'or p q))
+(define-syntax-rule (conj p q) (list 'and p q))
+(define-syntax-rule (=> p q) (list '=> p q))
+(define-syntax-rule (neg p) (list 'not p))
+; don't really need fresh for binder, right?
+; I think you'd still need free var checks if you do this idk.
+(define-syntax-rule (forall x p) (let ([x 'x]) (list 'forall x p)))
+(define-syntax-rule (exists x p) (let ([x 'x]) (list 'exists x p)))
+
+(module+ test
+  ; modus ponens
+  (check-not-exn
+   (lambda ()
+     (fresh
+      (a b)
+      (check-proof
+       (list a (=> a b)) b
+       (Sequence
+        CR
+        (Branch (=>L (=> a b))
+                (Sequence
+                 OrR1
+                 I)
+                (Sequence I))))))))
+
+; ctx,p |- q
+; ------------- =>R
+; ctx |- p => q
+(define-rule (=>R ctx p)
+  (match p
+    [`(=> ,p ,q)
+     (list (list (cons p ctx) q))]))
+
+; ctx,a,b |- p
+; ------------- AndL
+; ctx, a^b |- p
+; unfolds all ands automatically
+(define-rule (AndL ctx p)
+  (define ctx^ (foldr (lambda (p ctx)
+                        (match p
+                          [`(and . ,ps)
+                           (append (flatten-and ps) ctx)]
+                          [_ (cons p ctx)]))
+                      '()
+                      ctx))
+  (list (list ctx^ p)))
+
+; (listof Formula) -> (listof Formula)
+; takes the arguments of an and formula
+; and flattens out nested ands
+(define (flatten-and ps)
+  (foldr (lambda (p flattened)
+           (match p
+             [`(and . ,ps)
+              (append (flatten-and ps) flattened)]
+             [p (cons p flattened)]))
+         '()
+         ps))
+(module+ test
+  (check-equal? (flatten-and '(a1 (and a2 a3) (and (and (and a4 a5) a6))))
+                '(a1 a2 a3 a4 a5 a6)))
+
+(module+ test
+  ; modus ponens theorem
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      '() (forall p (forall q (=> (conj p (=> p q)) q)))
+      (fresh
+       (p q)
+       (Sequence
+        (ForallR p)
+        (ForallR q)
+        =>R
+        AndL
+        CR
+        (Branch
+         (=>L (=> p q))
+         (Sequence
+          OrR1
+          I)
+         I))))))
+  ; absurd
+  (check-not-exn
+   (lambda ()
+     (fresh
+      (a)
+      (check-proof
+       (list (forall x x)) a
+       (Sequence
+        ; this only works bc forall doesn't use fresh
+        ; I thought something might need to get bound here, but
+        ; you're always going to instantiate with something already bound
+        (ForallL (forall x x) a)
+        I))))))
+
+; for binding, you just might need fresh sometimes
+; but ForallR and ExistsL will always need a fresh var
+
+; use to instantiate nested conclusion foralls
+(define-syntax ForallR*
+  (syntax-rules ()
+    [(_ () proof) proof]
+    [(_ (x0 x ...) proof)
+     (fresh
+      (x0)
+      (Sequence
+       (ForallR x0)
+       (ForallR* (x ...) proof)))]))
+
+(define-syntax ExistsL*
+  (syntax-rules ()
+    [(_ () proof) proof]
+    [(_ ([p-exists x] pair ...) proof)
+     (fresh
+      (x)
+      (Sequence
+       (ExistsL p-exists x)
+       (ExistsL* (pair ...) proof)))]))
+
+; ctx |- p[t/x]
+; ------------------- ExistsR
+; ctx |- (exists x p)
+; if you can prove that a t satisfies p,
+; t is something that exists that satisfied p!
+(define-rule ((ExistsR t) ctx p)
+  (match p
+    [`(exists ,x ,p)
+     (list (list ctx (subst p x t)))]
+    [_ (error 'ExistsR "rule not applicable")]))
+
+(module+ test
+  ; modus ponens theorem
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      '() (forall p (forall q (=> (conj p (=> p q)) q)))
+      (ForallR*
+       (p q)
+       (Sequence
+        =>R
+        AndL
+        CR
+        (Branch
+         (=>L (=> p q))
+         (Sequence
+          OrR1
+          I)
+         I))))))
+  ; (exists x p) => (exists y q) if p => q
+  (check-not-exn
+   (lambda ()
+     (check-proof
+      (list (exists x (exists y (and x y)))) (exists z z)
+      (ExistsL*
+       ([(exists x (exists y (and x y))) w]
+        ; notice how you have access to w here
+        [(exists y (and w y)) w])
+       (Sequence
+        AndL
+        (ExistsR w)
+        I))))))
 
 ; latex
 
@@ -427,7 +585,7 @@ The list of inference trees is the sub-proofs
     [(cons str (? cons? strs))
      (format "~a~a~a"
              str
-             sep
+             sep
              (string-join sep strs))]
     [(list str) str]))
 
