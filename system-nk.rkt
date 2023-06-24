@@ -12,7 +12,6 @@
 ; So initially, we write proofs as raw data. But then we implement macros and use those.
 ; TODO once you're done, move this into a separate repo and organize it
 
-; TODO compound terms for theories
 ; TODO syntax-spec frontend!
 ; TODO variadic rules for and/or and latex
 ; TODO extend-context function that flattens (and)
@@ -24,6 +23,8 @@
 ; not every time you use it.
 ; TODO de-gensym when printing, but still avoid name conflicts
 ; TODO pass auto to curried rule and have it grab the first thing that fits
+; TODO better solution for the forall fresh var problem. need to be able to specify foralls, but
+; it'd be nice if they could use fresh. maybe do a bound-alpha-equality lookup?
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -32,10 +33,8 @@
 ; (=> Formula Formula)               implication
 ; (forall symbol? Formula)           universal quantification
 ; (exists symbol? Formula)           existential quantification
-; (= symbol? symbol?)                equality
-;
-; for later:
 ; (symbol? symbol? ...)              operator from a theory
+;
 
 ; A Context is a (listof Formula) representing formulae that are assumed to be true
 
@@ -216,16 +215,17 @@ The list of inference trees is the sub-proofs
            (list (cons q ctx) s))]
     [(_ _) (error '=>L^ "rule not applicable. Did you forget an or?")]))
 
-; ctx |- p    ctx, q |- r
+; ctx |- p    ctx, p, q |- r
 ; ----------------------- =>L
 ; ctx, p=>q |- r
+; to use an implication, prove the antecedent, then use the consequent
 (define-rule ((=>L impl) ctx r)
   (match impl
     [`(=> ,p ,q)
      (unless (member impl ctx)
        (error '=>L "implication not in context"))
      (list (list ctx p)
-           (list (cons q ctx) r))]
+           (list (list* p q ctx) r))]
     [_ (error '=>L "rule not applicable")]))
 
 ; ctx |- q  ctx, q |- p
@@ -322,16 +322,28 @@ The list of inference trees is the sub-proofs
      (list (list ctx (subst p-body x y)))]
     [_ (error 'ForallR "rule not applicable")]))
 
-; Formula symbol? Formula -> Formula
-; p[replacement/x]
-(define (subst p x replacement)
+; Formula Formula Formula -> Formula
+; p[replacement/target]
+(define (subst p target replacement)
   (match p
-    [(? symbol?)
-     (if (eq? p x) replacement p)]
-    [(cons (and op (or 'or 'and '=> '=)) ps)
-     (cons op (for/list ([p ps]) (subst p x replacement)))]
+    [(== target)
+     replacement]
+    [(? symbol?) p]
     [(list (and quantifier (or 'forall 'exists)) a body)
-     (if (eq? x a) p (list quantifier a (subst body x replacement)))]))
+     (if (member a (free-vars target))
+         p
+         (list quantifier a (subst body target replacement)))]
+    [(cons op ps)
+     (cons op (for/list ([p ps]) (subst p target replacement)))]))
+
+; Formula -> (listof symbol?)
+(define (free-vars p)
+  (match p
+    [(? symbol?) (list p)]
+    [(list (and quantifier (or 'forall 'exists)) a body)
+     (set-subtract (free-vars body) (list a))]
+    [(cons op ps)
+     (apply append (map free-vars ps))]))
 
 ; symbol? Context -> boolean?
 (define (occurs-free?/context x ctx)
@@ -342,19 +354,19 @@ The list of inference trees is the sub-proofs
   (match p
     [(? symbol?)
      (eq? x p)]
-    [(cons (or 'or 'and '=> '=) ps)
-     (for/or ([p ps]) (occurs-free? x p))]
     [(list (or 'forall 'exists) a p)
-     (and (not (eq? x a)) (occurs-free? x p))]))
+     (and (not (eq? x a)) (occurs-free? x p))]
+    [(cons op ps)
+     (for/or ([p ps]) (occurs-free? x p))]))
 
 ; symbol? Formula -> boolean?
 (define (occurs-bound? x p)
   (match p
     [(? symbol?) #f]
-    [(cons (or 'or 'and '=> '=) ps)
-     (for/or ([p ps]) (occurs-bound? x p))]
     [(list (or 'forall 'exists) a p)
-     (or (eq? x a) (occurs-free? x p))]))
+     (or (eq? x a) (occurs-free? x p))]
+    [(cons op ps)
+     (for/or ([p ps]) (occurs-bound? x p))]))
 
 (define proof-with-cuts
   `(()
@@ -426,9 +438,9 @@ The list of inference trees is the sub-proofs
 
 ; macros for formulae
 (define-syntax-rule (fresh (x ...) body ...) (let ([x (gensym 'x)] ...) body ...))
-(define-syntax-rule (disj p q) (list 'or p q))
-(define-syntax-rule (conj p q) (list 'and p q))
-(define-syntax-rule (=> p q) (list '=> p q))
+(define (disj p q) (list 'or p q))
+(define (conj p q) (list 'and p q))
+(define (=> p q) (list '=> p q))
 ; don't really need fresh for binder, right?
 ; I think you'd still need free var checks if you do this idk.
 (define-syntax forall
@@ -601,7 +613,7 @@ The list of inference trees is the sub-proofs
 ; equality
 
 ; shadows number =, but whatever
-(define-syntax-rule (= t1 t2) (list '= t1 t2))
+(define (= t1 t2) (list '= t1 t2))
 
 ; ctx |- p[t2/t1]
 ; --------------- =L
@@ -643,18 +655,17 @@ The list of inference trees is the sub-proofs
 ; formula macros
 
 ; bidirectional implication
-(define-syntax-rule (<=> p q) (conj (=> p q) (=> q p)))
+(define (<=> p q) (conj (=> p q) (=> q p)))
 ; unique existence
-(define-syntax-rule (exists! x p y)
-  (begin
-    ; this is only necessary because we perform substitution on p
-    (when (occurs-free? y p)
-      (error 'exists! "universally quantified variable must not be free in formula"))
-    (exists x (forall y (<=> (subst p x y) (= x y))))))
+(define (exists! x p y)
+  ; this is only necessary because we perform substitution on p
+  (when (occurs-free? y p)
+    (error 'exists! "universally quantified variable must not be free in formula"))
+  (exists x (forall y (<=> (subst p x y) (= x y)))))
 ; can be used to prove anything, impossible to prove (without itself or equivalent)
 (define bottom (forall a a))
 ; logical negation
-(define-syntax-rule (neg p) (=> p bottom))
+(define (neg p) (=> p bottom))
 ; useless as an assumption (except to prove itself), can always be proven
 (define top (exists a a))
 
@@ -711,7 +722,6 @@ The list of inference trees is the sub-proofs
 ; --------------- NotR
 ; ctx |- (not p)
 (define-rule (NotR ctx p) (=>R ctx p))
-
 
 (module+ test
   ; proof by contradiction
@@ -869,6 +879,99 @@ The list of inference trees is the sub-proofs
         (Checked=>L (=> p q))
         I
         I))))))
+
+; for making judgements. can't use |- unfortunately
+(define (/- ctx p) (list ctx p))
+
+; terms
+
+;zfc
+
+; set membership
+(define (in e s) (list 'in e s))
+
+; axioms
+
+; equality on sets is determined by membership
+(define extensionality
+  (forall (x y) (=> (forall z (<=> (in z x) (in z y)))
+                    (= x y))))
+; ctx |- (forall z (in z x) <=> (in z y))
+; --------------------------------------- Extensionality
+; ctx |- (= x y)
+(define-rule (Extensionality ctx p)
+  (match p
+    [`(= ,x ,y)
+     ; assuming free vars are fresh
+     (list (/- ctx (forall z (<=> (in z x) (in z y)))))]
+    [_ (error 'Extensionality "rule is not applicable")]))
+
+; this breaks if you do (forall x (null-set? x))
+#;
+(define (null-set? e) (forall x (neg (in x e))))
+
+(define zfc-axioms (list extensionality))
+
+; peano
+
+(define zero (fresh (zero) zero))
+(define (succ n) (list 'succ n))
+(define (nat? x) (list 'nat? x))
+
+; axioms
+
+(define zero-is-nat (nat? zero))
+; ------------------ ZeroIsNat
+; ctx |- (nat? zero)
+(define-rule (ZeroIsNat ctx p)
+  (match p
+    [(== (nat? zero)) '()]
+    [`(nat? ,n) (list (/- ctx (= n zero)))]
+    [_ (error 'ZeroIsNat "rule is not applicable")]))
+
+; equality axioms follow from existing ones
+
+(define succ-is-nat (forall n (=> (nat? n) (nat? (succ n)))))
+; ctx |- (nat? n)
+; ---------------
+; ctx |- (nat? (succ n))
+(define-rule (SuccIsNat ctx p)
+  (match p
+    [`(nat? (succ ,n))
+     (list (/- ctx (nat? n)))]
+    [`(nat? ,n)
+     ; assuming free vars are fresh
+     (list (/- ctx (exists pn (conj (= (succ pn) n) (nat? n)))))]
+    [_ (error 'SuccIsNat "rule is not applicable")]))
+
+(define nat= (forall (n m) (=> (= (succ n) (succ m))
+                               (= n m))))
+; ctx |- (= (succ n) (succ m))
+; ---------------------------- Nat=
+; ctx |- (= n m)
+(define-rule (Nat= ctx p)
+  (match p
+    [`(= ,n ,m)
+     (list (/- ctx (= (succ n) (succ m))))]
+    [_ (error 'Nat= "rule is not applicable")]))
+
+(define zero-not-succ (forall n (neg (= (succ n) zero))))
+
+; ctx |- p[zero/x]   ctx |- (forall x p => p[(succ x)/x])
+; ------------------------------------------------------- NatInduction
+; ctx |- (forall x p)
+(define-rule (NatInduction ctx p)
+  (match p
+    [`(forall ,x ,p)
+     (list (/- ctx (subst p x zero))
+           ; need to make sure we use the same x
+           (/- ctx `(forall ,x ,(=> p (subst p x (succ x))))))]))
+
+; TODO addition and multiplication as checked rules?
+
+(define peano-axioms (list zero-is-nat succ-is-nat zero-not-succ))
+
+; TODO transfinite ordinals??
 
 ; latex
 
