@@ -24,7 +24,10 @@
 ; TODO de-gensym when printing, but still avoid name conflicts
 ; TODO pass 'auto to curried rule and have it grab the first thing that fits
 ; TODO pattern matching and context membership assertion in define-rule.
-; maybe even make a sophisticated macro for it like turnstile
+; maybe even make a sophisticated macro for it like turnstile. What about
+; curried rules needing more info?
+; TODO track rule name as a param and have assertions/errors use it. default in assert in ctx
+; TODO track context as a param and have assert-in-context use it? can make it default to current
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -109,31 +112,53 @@
   #:property prop:object-name (lambda (rul) (rule-name rul))
   #:property prop:procedure (lambda (rul . args) (apply (rule-proc rul) args)))
 
+; cannot be used for curried rules with optional/kw args
 (define-syntax define-rule
-  (syntax-rules ()
-    [(_ ((name . args) ctx p) body ...)
-     (define (name . args)
-       (rule (lambda (ctx p)
-               body
-               ...)
-             'name))]
+  (syntax-parser
+    [(_ ((name pat ...) ctx p) body ...)
+     (define/syntax-parse (arg ...) (generate-temporaries (attribute pat)))
+     #'(define (name arg ...)
+         (match*-formula name (arg ...)
+                         [(pat ...)
+                          (rule (lambda (ctx pv)
+                                  (match-formula name pv
+                                                 [p body ...]))
+                                'name)]))]
     [(_ (name ctx p) body ...)
-     (define name
-       (rule (lambda (ctx p)
-               body
-               ...)
-             'name))]))
+     #'(define name
+         (rule (lambda (ctx pv)
+                 (match-formula name pv
+                   [p body ...]))
+               'name))]))
+
+(define-syntax match*-formula
+  (syntax-parser
+    [(_ who (p:id ...) [(pat ...) body ...])
+     (define/syntax-parse (underscore ...) (for/list ([_ (attribute pat)]) #'_))
+     #'(match* (p ...)
+         [(pat ...) body ...]
+         [(underscore ...) (formula-shapes-error who (p ...) (pat ...))])]))
+
+(define-syntax-rule (match-formula who p [pat body ...] ...)
+  ; assume p is a variable
+  (match p
+    [pat body ...]
+    ...
+    [_ (formula-shape-error who p pat ...)]))
+
+(define-syntax-rule (formula-shape-error who p pat ...)
+  (error 'who "Rule is not applicable. Expected a formula looking like one of ~v, but got ~v" (list 'pat ...) p))
+
+(define-syntax-rule (formula-shapes-error who (p ...) (pat ...))
+  (error 'who "Rule is not applicable. Expected formulas looking like ~v, but got ~v" (list 'pat ...) (list p ...)))
 
 ; Example
 ; ctx |- p1   ctx |- p2
 ; ---------------------
 ; ctx |- p1 and p2
-(define-rule (AndR ctx p)
-  (match p
-    [`(and ,p1 ,p2)
-     (list (/- ctx p1)
-           (/- ctx p2))]
-    [_ (error 'AndR "rule not applicable")]))
+(define-rule (AndR ctx `(and ,p1 ,p2))
+  (list (/- ctx p1)
+        (/- ctx p2)))
 ; This rule means to prove p1 and p2, you must supply a proof for p1 and a proof for p2
 
 ; p in ctx
@@ -146,12 +171,9 @@
 ; (forall x p-body) in ctx    ctx,p-body[t/x] |- p
 ; ------------------------------------------------
 ; ctx |- p
-(define-rule ((ForallL p-forall t) ctx p)
-  (match p-forall
-    [`(forall ,x ,p-body)
-     (assert-in-context p-forall ctx 'ForallL)
-     (list (/- (extend-context ctx (subst p-body x t)) p))]
-    [_ (error 'ForallL "rule not applicable")]))
+(define-rule ((ForallL (and p-forall `(forall ,x ,p-body)) t) ctx p)
+  (assert-in-context p-forall ctx 'ForallL)
+  (list (/- (extend-context ctx (subst p-body x t)) p)))
 ; This rule means if you assume a forall, you can "instantiate" it with any term and assume its body
 ; This instantiation uses variable substitution
 ; The rule takes in p/forall so it knows which forall you're talking about, since this is
@@ -234,25 +256,19 @@ The list of inference trees is the sub-proofs
 ; ----------------------------- =>L^
 ; ctx, p=>q |- r or s
 ; included for completeness. Annoying to use
-(define-rule ((=>L^ impl) ctx p)
-  (match* (impl p)
-    [(`(=> ,p ,q) `(or ,r ,s))
-     (assert-in-context impl ctx '=>L^)
-     (list (/- ctx `(or ,p ,r))
-           (/- (extend-context ctx q) s))]
-    [(_ _) (error '=>L^ "rule not applicable. Did you forget an or?")]))
+(define-rule ((=>L^ (and impl `(=> ,p ,q))) ctx `(or ,r ,s))
+  (assert-in-context impl ctx '=>L^)
+  (list (/- ctx `(or ,p ,r))
+        (/- (extend-context ctx q) s)))
 
 ; ctx |- p    ctx, p, q |- r
 ; ----------------------- =>L
 ; ctx, p=>q |- r
 ; to use an implication, prove the antecedent, then use the consequent
-(define-rule ((=>L impl) ctx r)
-  (match impl
-    [`(=> ,p ,q)
-     (assert-in-context impl ctx '=>L)
-     (list (/- ctx p)
-           (/- (extend-context ctx p q) r))]
-    [_ (error '=>L "rule not applicable")]))
+(define-rule ((=>L (and impl `(=> ,p ,q))) ctx r)
+  (assert-in-context impl ctx '=>L)
+  (list (/- ctx p)
+        (/- (extend-context ctx p q) r)))
 
 ; ctx |- q  ctx, q |- p
 ; --------------------- cut
@@ -270,20 +286,14 @@ The list of inference trees is the sub-proofs
 ; ctx |- p
 ; ------------- OrR1
 ; ctx |- p or q
-(define-rule (OrR1 ctx p)
-  (match p
-    [`(or ,p ,_)
-     (list (/- ctx p))]
-    [_ (error 'OrR1 "rule not applicable")]))
+(define-rule (OrR1 ctx `(or ,p ,_))
+  (list (/- ctx p)))
 
 ; ctx |- q
 ; ------------- OrR2
 ; ctx |- p or q
-(define-rule (OrR2 ctx p)
-  (match p
-    [`(or ,_ ,q)
-     (list (/- ctx q))]
-    [_ (error 'OrR2 "rule not applicable")]))
+(define-rule (OrR2 ctx `(or ,_ ,q))
+  (list (/- ctx q)))
 
 ; -------- Debug
 ; ctx |- p
@@ -326,25 +336,19 @@ The list of inference trees is the sub-proofs
 ; ctx, p-body[y/x] |- p
 ; --------------------------- ExistsL
 ; ctx, (exists x p-body) |- p
-(define-rule ((ExistsL p-exists y) ctx p)
-  (match p-exists
-    [`(exists ,x ,p-body)
-     (when (or (occurs-free? y p) (occurs-free?/context y ctx))
-       (error 'ExistsL "cannot instantiate existential with a variable that occurs free in lower sequents"))
-     (list (/- (extend-context ctx (subst p-body x y)) p))]
-    [_ (error 'ExistsL "rule not applicable")]))
+(define-rule ((ExistsL `(exists ,x ,p-body) y) ctx p)
+  (when (or (occurs-free? y p) (occurs-free?/context y ctx))
+    (error 'ExistsL "cannot instantiate existential with a variable that occurs free in lower sequents"))
+  (list (/- (extend-context ctx (subst p-body x y)) p)))
 
 ; ctx |- p-body[y/x]
 ; ------------------------ ForallR
 ; ctx |- (forall x p-body)
-(define-rule ((ForallR y) ctx p)
-  (match p
-    [`(forall ,x ,p-body)
-     ; important to use p. x = y can be ok
-     (when (or (occurs-free? y p) (occurs-free?/context y ctx))
-       (error "cannot instantiate forall with a variable that occurs free in lower sequents"))
-     (list (/- ctx (subst p-body x y)))]
-    [_ (error 'ForallR "rule not applicable")]))
+(define-rule ((ForallR y) ctx (and p `(forall ,x ,p-body)))
+  ; important to use p. x = y can be ok
+  (when (or (occurs-free? y p) (occurs-free?/context y ctx))
+    (error "cannot instantiate forall with a variable that occurs free in lower sequents"))
+  (list (/- ctx (subst p-body x y))))
 
 ; Formula Formula Formula -> Formula
 ; p[replacement/target]
@@ -573,10 +577,8 @@ The list of inference trees is the sub-proofs
 ; ctx,p |- q
 ; ------------- =>R
 ; ctx |- p => q
-(define-rule (=>R ctx p)
-  (match p
-    [`(=> ,p ,q)
-     (list (/- (extend-context ctx p) q))]))
+(define-rule (=>R ctx `(=> ,p ,q))
+  (list (/- (extend-context ctx p) q)))
 
 ; ctx,a,b |- p
 ; ------------- AndL
@@ -665,11 +667,8 @@ The list of inference trees is the sub-proofs
 ; ctx |- (exists x p)
 ; if you can prove that a t satisfies p,
 ; t is something that exists that satisfied p!
-(define-rule ((ExistsR t) ctx p)
-  (match p
-    [`(exists ,x ,p)
-     (list (/- ctx (subst p x t)))]
-    [_ (error 'ExistsR "rule not applicable")]))
+(define-rule ((ExistsR t) ctx `(exists ,x ,p))
+  (list (/- ctx (subst p x t))))
 
 (module+ test
   ; modus ponens theorem
@@ -720,13 +719,10 @@ The list of inference trees is the sub-proofs
 
 ; ------------ =R
 ; ctx |- t = t
-(define-rule (=R ctx p)
-  (match p
-    [`(= ,p ,q)
-     (unless (alpha-eqv? p q)
-       (error '=R "terms are not equal: ~a vs ~a" p q))
-     '()]
-    [_ (error '=R "rule not applicable")]))
+(define-rule (=R ctx `(= ,p ,q))
+  (unless (alpha-eqv? p q)
+    (error '=R "terms are not equal: ~a vs ~a" p q))
+  '())
 
 (module+ test
   ; transitive property of equality
@@ -794,18 +790,11 @@ The list of inference trees is the sub-proofs
 ; ctx must not be empty
 (define-rule (TopR ctx p)
   (unless (alpha-eqv? p top)
-    (error 'TopR "rule not applicable"))
+    (error 'TopR "rule is not applicable"))
   ; do you really need this?
   (when (null? ctx)
     (error 'TopR "contex is empty"))
   '())
-
-; ctx |- p and (not p)
-; -------------------- BottomR
-; ctx |- bottom
-; contradiction
-#;
-(define-rule (BottomR))
 
 ; ctx p |- bottom
 ; --------------- NotR
@@ -930,19 +919,16 @@ The list of inference trees is the sub-proofs
 ; ctx |- p    ctx, q |- r
 ; ----------------------- =>L
 ; ctx, p=>q |- r
-(define-rule ((Checked=>L impl) ctx r)
-  (match impl
-    [`(=> ,p ,q)
-     (assert-in-context impl ctx 'Checked=>L)
-     (check-proof/defer
-      ctx r
-      (Sequence
-       CR
-       (Branch
-        (=>L^ (=> p q))
-        (Sequence OrR1 Defer)
-        Defer)))]
-    [_ (error 'Checked=>L "rule not applicable")]))
+(define-rule ((Checked=>L (and impl `(=> ,p ,q))) ctx r)
+  (assert-in-context impl ctx 'Checked=>L)
+  (check-proof/defer
+   ctx r
+   (Sequence
+    CR
+    (Branch
+     (=>L^ (=> p q))
+     (Sequence OrR1 Defer)
+     Defer))))
 
 (module+ test
   ; TODO test other rules in this way
@@ -980,11 +966,8 @@ The list of inference trees is the sub-proofs
 ; ctx |- (forall z (in z x) <=> (in z y))
 ; --------------------------------------- Extensionality
 ; ctx |- (= x y)
-(define-rule (Extensionality ctx p)
-  (match p
-    [`(= ,x ,y)
-     (list (/- ctx (forall z (<=> (in z x) (in z y)))))]
-    [_ (error 'Extensionality "rule is not applicable")]))
+(define-rule (Extensionality ctx `(= ,x ,y))
+  (list (/- ctx (forall z (<=> (in z x) (in z y))))))
 
 ; this breaks if you do (forall x (null-set? x))
 #;
@@ -1004,10 +987,9 @@ The list of inference trees is the sub-proofs
 ; ------------------ ZeroIsNat
 ; ctx |- (nat? zero)
 (define-rule (ZeroIsNat ctx p)
-  (match p
-    [(== (nat? zero) alpha-eqv?) '()]
-    [`(nat? ,n) (list (/- ctx (= n zero)))]
-    [_ (error 'ZeroIsNat "rule is not applicable")]))
+  (match-formula ZeroIsNat p
+                 [(== (nat? zero) alpha-eqv?) '()]
+                 [`(nat? ,n) (list (/- ctx (= n zero)))]))
 
 ; equality axioms follow from existing ones
 
@@ -1016,36 +998,30 @@ The list of inference trees is the sub-proofs
 ; ---------------
 ; ctx |- (nat? (succ n))
 (define-rule (SuccIsNat ctx p)
-  (match p
-    [`(nat? (succ ,n))
-     (list (/- ctx (nat? n)))]
-    [`(nat? ,n)
-     ; assuming free vars are fresh
-     (list (/- ctx (exists pn (conj (= (succ pn) n) (nat? n)))))]
-    [_ (error 'SuccIsNat "rule is not applicable")]))
+  (match-formula SuccIsNat p
+                 [`(nat? (succ ,n))
+                  (list (/- ctx (nat? n)))]
+                 [`(nat? ,n)
+                  ; assuming free vars are fresh
+                  (list (/- ctx (exists pn (conj (= (succ pn) n) (nat? n)))))]))
 
 (define nat= (forall (n m) (=> (= (succ n) (succ m))
                                (= n m))))
 ; ctx |- (= (succ n) (succ m))
 ; ---------------------------- Nat=
 ; ctx |- (= n m)
-(define-rule (Nat= ctx p)
-  (match p
-    [`(= ,n ,m)
-     (list (/- ctx (= (succ n) (succ m))))]
-    [_ (error 'Nat= "rule is not applicable")]))
+(define-rule (Nat= ctx `(= ,n ,m))
+  (list (/- ctx (= (succ n) (succ m)))))
 
 (define zero-not-succ (forall n (neg (= (succ n) zero))))
 
 ; ctx |- p[zero/x]   ctx |- (forall x p => p[(succ x)/x])
 ; ------------------------------------------------------- NatInduction
 ; ctx |- (forall x p)
-(define-rule (NatInduction ctx p)
-  (match p
-    [`(forall ,x ,p)
-     (list (/- ctx (subst p x zero))
-           ; need to make sure we use the same x
-           (/- ctx `(forall ,x ,(=> p (subst p x (succ x))))))]))
+(define-rule (NatInduction ctx `(forall ,x ,p))
+  (list (/- ctx (subst p x zero))
+        ; need to make sure we use the same x
+        (/- ctx `(forall ,x ,(=> p (subst p x (succ x)))))))
 
 ; TODO addition and multiplication as checked rules?
 
