@@ -23,11 +23,6 @@
 ; not every time you use it. Only good for some checked rules, might not be worth.
 ; TODO de-gensym when printing, but still avoid name conflicts
 ; TODO pass 'auto to curried rule and have it grab the first thing that fits
-; TODO pattern matching and context membership assertion in define-rule.
-; maybe even make a sophisticated macro for it like turnstile. What about
-; curried rules needing more info?
-; TODO track rule name as a param and have assertions/errors use it. default in assert in ctx
-; TODO track context as a param and have assert-in-context use it? can make it default to current
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -45,18 +40,18 @@
 ; Formula ... -> Context
 (define (context . ps) ps)
 
-(define (assert-in-context p ctx [who-sym #f])
+(define (assert-in-context p [ctx (current-context)] [who-sym (object-name (current-rule))])
   (unless (in-context? p ctx)
     (if who-sym
         (error who-sym "~a not found in context ~a" p ctx)
         (error "~a not found in context ~a" p ctx))))
 
 ; Formula Context -> boolean?
-(define (in-context? p ctx)
+(define (in-context? p [ctx (current-context)])
   (member p ctx alpha-eqv?))
 
 ; (Formula -> Any) Context -> boolean?
-(define (find-in-context proc ctx)
+(define (find-in-context proc [ctx (current-context)])
   (findf proc ctx))
 
 ; Context Formula ... -> Context
@@ -118,39 +113,49 @@
     [(_ ((name pat ...) ctx p) body ...)
      (define/syntax-parse (arg ...) (generate-temporaries (attribute pat)))
      #'(define (name arg ...)
-         (match*-formula name (arg ...)
-                         [(pat ...)
-                          (rule (lambda (ctx pv)
-                                  (match-formula name pv
-                                                 [p body ...]))
-                                'name)]))]
+         (match*-formula (arg ...)
+           [(pat ...)
+            (define rul
+              (rule (lambda (ctx pv)
+                      (match-formula pv
+                                     [p (parameterize ([current-context ctx]
+                                                       [current-conclusion pv]
+                                                       [current-rule rul])
+                                          body
+                                          ...)]))
+                    'name))
+            rul]))]
     [(_ (name ctx p) body ...)
      #'(define name
          (rule (lambda (ctx pv)
-                 (match-formula name pv
-                   [p body ...]))
+                 (match-formula pv
+                   [p (parameterize ([current-context ctx]
+                                     [current-conclusion pv]
+                                     [current-rule name])
+                        body
+                        ...)]))
                'name))]))
 
 (define-syntax match*-formula
   (syntax-parser
-    [(_ who (p:id ...) [(pat ...) body ...])
+    [(_ (p:id ...) [(pat ...) body ...])
      (define/syntax-parse (underscore ...) (for/list ([_ (attribute pat)]) #'_))
      #'(match* (p ...)
          [(pat ...) body ...]
-         [(underscore ...) (formula-shapes-error who (p ...) (pat ...))])]))
+         [(underscore ...) (formula-shapes-error (p ...) (pat ...))])]))
 
-(define-syntax-rule (match-formula who p [pat body ...] ...)
+(define-syntax-rule (match-formula p [pat body ...] ...)
   ; assume p is a variable
   (match p
     [pat body ...]
     ...
-    [_ (formula-shape-error who p pat ...)]))
+    [_ (formula-shape-error p pat ...)]))
 
-(define-syntax-rule (formula-shape-error who p pat ...)
-  (error 'who "Rule is not applicable. Expected a formula looking like one of ~v, but got ~v" (list 'pat ...) p))
+(define-syntax-rule (formula-shape-error p pat ...)
+  (error (object-name (current-rule)) "Rule is not applicable. Expected a formula looking like one of ~v, but got ~v" (list 'pat ...) p))
 
-(define-syntax-rule (formula-shapes-error who (p ...) (pat ...))
-  (error 'who "Rule is not applicable. Expected formulas looking like ~v, but got ~v" (list 'pat ...) (list p ...)))
+(define-syntax-rule (formula-shapes-error (p ...) (pat ...))
+  (error (object-name (current-rule)) "Rule is not applicable. Expected formulas looking like ~v, but got ~v" (list 'pat ...) (list p ...)))
 
 ; Example
 ; ctx |- p1   ctx |- p2
@@ -165,14 +170,14 @@
 ; --------
 ; ctx |- p
 (define-rule (I ctx p)
-  (assert-in-context p ctx 'I)
+  (assert-in-context p)
   '())
 
 ; (forall x p-body) in ctx    ctx,p-body[t/x] |- p
 ; ------------------------------------------------
 ; ctx |- p
 (define-rule ((ForallL (and p-forall `(forall ,x ,p-body)) t) ctx p)
-  (assert-in-context p-forall ctx 'ForallL)
+  (assert-in-context p-forall)
   (list (/- (extend-context ctx (subst p-body x t)) p)))
 ; This rule means if you assume a forall, you can "instantiate" it with any term and assume its body
 ; This instantiation uses variable substitution
@@ -213,22 +218,32 @@ The list of inference trees is the sub-proofs
      ,I ; prove a
      ,I))) ; prove b
 
+(define current-rule (make-parameter #f))
+(define current-context (make-parameter (context)))
+; the formula being proven
+(define current-conclusion (make-parameter #f))
+
 ; Context Formula ProofTree -> InferenceTree
 ; Check that the proof tree proves the formula to be true under the context
 (define (check-proof ctx p tree)
-  (match tree
-    [(? rule? rul)
-     ; using a rule by itself like I is the same as (list I)
-     (check-proof ctx p (list rul))]
-    [(cons rule subtrees)
-     (match-define (list (list subcontexts subformulae) ...) (rule ctx p))
-     (unless (= (length subtrees) (length subcontexts))
-       (error 'check-proof "incorrect number of subproofs. Expected ~a, given ~a. Rule: ~a" (length subcontexts) (length subtrees) rule))
-     (list (/- ctx p) rule
-           (for/list ([ctx subcontexts]
-                      [p subformulae]
-                      [tree subtrees])
-             (check-proof ctx p tree)))]))
+  (parameterize ([current-context ctx]
+                 [current-conclusion p])
+      (match tree
+        [(? rule? rul)
+         ; using a rule by itself like I is the same as (list I)
+         (check-proof ctx p (list rul))]
+        [(cons rul subtrees)
+         (match-define
+           (list (list subcontexts subformulae) ...)
+           (parameterize ([current-rule rul])
+             (rul ctx p)))
+         (unless (= (length subtrees) (length subcontexts))
+           (error (object-name rul) "incorrect number of subproofs. Expected ~a, given ~a" (length subcontexts) (length subtrees)))
+         (list (/- ctx p) rul
+               (for/list ([ctx subcontexts]
+                          [p subformulae]
+                          [tree subtrees])
+                 (check-proof ctx p tree)))])))
 
 (module+ test
   (check-not-exn (lambda () proof1)))
@@ -257,7 +272,7 @@ The list of inference trees is the sub-proofs
 ; ctx, p=>q |- r or s
 ; included for completeness. Annoying to use
 (define-rule ((=>L^ (and impl `(=> ,p ,q))) ctx `(or ,r ,s))
-  (assert-in-context impl ctx '=>L^)
+  (assert-in-context impl)
   (list (/- ctx `(or ,p ,r))
         (/- (extend-context ctx q) s)))
 
@@ -266,7 +281,7 @@ The list of inference trees is the sub-proofs
 ; ctx, p=>q |- r
 ; to use an implication, prove the antecedent, then use the consequent
 (define-rule ((=>L (and impl `(=> ,p ,q))) ctx r)
-  (assert-in-context impl ctx '=>L)
+  (assert-in-context impl)
   (list (/- ctx p)
         (/- (extend-context ctx p q) r)))
 
@@ -329,8 +344,8 @@ The list of inference trees is the sub-proofs
 ; ----------------- ModusPonens
 ; ctx, p, p->q |- q
 (define-rule ((ModusPonens p) ctx q)
-  (assert-in-context `(=> ,p ,q) ctx 'ModusPonens)
-  (assert-in-context p ctx 'ModusPonens)
+  (assert-in-context `(=> ,p ,q))
+  (assert-in-context p)
   '())
 
 ; ctx, p-body[y/x] |- p
@@ -782,7 +797,7 @@ The list of inference trees is the sub-proofs
 ; --------------- BottomL
 ; ctx,bottom |- p
 (define-rule (BottomL ctx p)
-  (assert-in-context bottom ctx 'BottomL)
+  (assert-in-context bottom)
   '())
 
 ; ---------- TopR
@@ -861,7 +876,7 @@ The list of inference trees is the sub-proofs
 ; ctx, (not p) |- q
 ; proof by contradiction
 (define-rule ((NotL p) ctx q)
-  (assert-in-context (neg p) ctx 'NotL)
+  (assert-in-context (neg p))
   (list (/- ctx p)))
 
 ; checked rules
@@ -900,8 +915,8 @@ The list of inference trees is the sub-proofs
 ; --------------- CheckedModusPonens
 ; ctx,p,p=>q |- q
 (define-rule ((CheckedModusPonens p) ctx q)
-  (assert-in-context `(=> ,p ,q) ctx 'CheckedModusPonens)
-  (assert-in-context p ctx 'CheckedModusPonens)
+  (assert-in-context `(=> ,p ,q))
+  (assert-in-context p)
   (check-proof/defer
    ctx q
    (Branch
@@ -920,7 +935,7 @@ The list of inference trees is the sub-proofs
 ; ----------------------- =>L
 ; ctx, p=>q |- r
 (define-rule ((Checked=>L (and impl `(=> ,p ,q))) ctx r)
-  (assert-in-context impl ctx 'Checked=>L)
+  (assert-in-context impl)
   (check-proof/defer
    ctx r
    (Sequence
@@ -987,7 +1002,7 @@ The list of inference trees is the sub-proofs
 ; ------------------ ZeroIsNat
 ; ctx |- (nat? zero)
 (define-rule (ZeroIsNat ctx p)
-  (match-formula ZeroIsNat p
+  (match-formula p
                  [(== (nat? zero) alpha-eqv?) '()]
                  [`(nat? ,n) (list (/- ctx (= n zero)))]))
 
@@ -998,7 +1013,7 @@ The list of inference trees is the sub-proofs
 ; ---------------
 ; ctx |- (nat? (succ n))
 (define-rule (SuccIsNat ctx p)
-  (match-formula SuccIsNat p
+  (match-formula p
                  [`(nat? (succ ,n))
                   (list (/- ctx (nat? n)))]
                  [`(nat? ,n)
