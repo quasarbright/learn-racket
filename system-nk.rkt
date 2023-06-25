@@ -1080,7 +1080,8 @@ The list of inference trees is the sub-proofs
 ; Formula -> string?
 (define (formula->latex p)
   (match p
-    ; TODO bottom, top, re-sugar neg?
+    [(== bottom alpha-eqv?) "\\bot"]
+    [(== top alpha-eqv?) "\\top"]
     [(? symbol?)
      (match (regexp-match #px"^(.*):(\\d*)$" (symbol->string p))
        [(list _ name number)
@@ -1089,6 +1090,8 @@ The list of inference trees is the sub-proofs
     [`(not ,p) (format "(\\neg ~a)" (formula->latex p))]
     [`(and ,p ,q) (format "(~a \\wedge ~a)" (formula->latex p) (formula->latex q))]
     [`(or ,p ,q) (format "(~a \\vee ~a)" (formula->latex p) (formula->latex q))]
+    [`(=> ,p ,(== bottom alpha-eqv?))
+     (formula->latex `(not ,p))]
     [`(=> ,p ,q) (format "(~a \\rightarrow ~a)" (formula->latex p) (formula->latex q))]
     [`(forall ,x ,p) (format "(\\forall ~a . ~a)" (formula->latex x) (formula->latex p))]
     [`(exists ,x ,p) (format "(\\exists ~a . ~a)" (formula->latex x) (formula->latex p))]))
