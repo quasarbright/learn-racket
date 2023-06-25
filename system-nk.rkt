@@ -14,15 +14,16 @@
 ; TODO once you're done, move this into a separate repo and organize it
 
 ; TODO syntax-spec frontend!
-; TODO variadic rules for and/or and latex
 ; TODO what programs do these proofs correspond to?
 ; TODO make a branch and reformulate everything in terms of forall and => lol
 ; TODO pattern expanders for formulae?
 ; TODO proof shape validation or something for better errors
+; TODO de-gensym when printing, but still avoid name conflicts
 ; TODO make it so the proof for a checked rule only runs once on generics,
 ; not every time you use it. Only good for some checked rules, might not be worth.
-; TODO de-gensym when printing, but still avoid name conflicts
-; TODO pass 'auto to curried rule and have it grab the first thing that fits
+; TODO pass 'auto to curried rule and have it grab the first thing that fits.
+; not really compatible with pattern stuff, which I prefer. Might be able to do something
+; clever though.
 
 ; A Formula is one of
 ; symbol?                            variable
@@ -43,8 +44,8 @@
 (define (assert-in-context p [ctx (current-context)] [who-sym (object-name (current-rule))])
   (unless (in-context? p ctx)
     (if who-sym
-        (error who-sym "~a not found in context ~a" p ctx)
-        (error "~a not found in context ~a" p ctx))))
+        (error who-sym "~v not found in context ~v" p ctx)
+        (error "~v not found in context ~v" p ctx))))
 
 ; Formula Context -> boolean?
 (define (in-context? p [ctx (current-context)])
@@ -161,9 +162,9 @@
 ; ctx |- p1   ctx |- p2
 ; ---------------------
 ; ctx |- p1 and p2
-(define-rule (AndR ctx `(and ,p1 ,p2))
-  (list (/- ctx p1)
-        (/- ctx p2)))
+(define-rule (AndR ctx `(and ,ps ...))
+  (for/list ([p ps])
+    (/- ctx p)))
 ; This rule means to prove p1 and p2, you must supply a proof for p1 and a proof for p2
 
 ; p in ctx
@@ -310,12 +311,20 @@ The list of inference trees is the sub-proofs
 (define-rule (OrR2 ctx `(or ,_ ,q))
   (list (/- ctx q)))
 
+; ctx |- p
+; ---------------------------------- OrR
+; ctx |- p1 or ... or p or ... or pn
+(define-rule ((OrR p) ctx `(or ,ps ...))
+  (unless (member p ps alpha-eqv?)
+    (error 'OrR "Rule not applicable. Formula not found in conjunction: ~v vs ~v" p (cons 'or ps)))
+  (list (/- ctx p)))
+
 ; -------- Debug
 ; ctx |- p
 ; Used to view the context and formula to prove.
 ; Can be used for an interactive experience.
 (define-rule (Debug ctx p)
-  (displayln (format "~a |- ~a" ctx p))
+  (displayln (format "~v |- ~v" ctx p))
   '())
 
 ; -------- TrustMe
@@ -557,8 +566,8 @@ The list of inference trees is the sub-proofs
 ; symbol? natural? -> symbol?
 (define (mk-var x n) (format-symbol "~a:~a" x n))
 
-(define (disj p q) (list 'or p q))
-(define (conj p q) (list 'and p q))
+(define (disj p . ps) (list* 'or p ps))
+(define (conj p . ps) (list* 'and p ps))
 (define (=> p q) (list '=> p q))
 (define-syntax forall
   (syntax-rules ()
@@ -736,7 +745,7 @@ The list of inference trees is the sub-proofs
 ; ctx |- t = t
 (define-rule (=R ctx `(= ,p ,q))
   (unless (alpha-eqv? p q)
-    (error '=R "terms are not equal: ~a vs ~a" p q))
+    (error '=R "terms are not equal: ~v vs ~v" p q))
   '())
 
 (module+ test
@@ -1088,8 +1097,8 @@ The list of inference trees is the sub-proofs
         (format "~a_~a" name number)]
        [_ (symbol->string p)])]
     [`(not ,p) (format "(\\neg ~a)" (formula->latex p))]
-    [`(and ,p ,q) (format "(~a \\wedge ~a)" (formula->latex p) (formula->latex q))]
-    [`(or ,p ,q) (format "(~a \\vee ~a)" (formula->latex p) (formula->latex q))]
+    [`(and ,ps ...) (format "(~a)" (string-join " \\wedge " (map formula->latex ps)))]
+    [`(or ,ps ...) (format "(~a)" (string-join " \\vee " (map formula->latex ps)))]
     [`(=> ,p ,(== bottom alpha-eqv?))
      (formula->latex `(not ,p))]
     [`(=> ,p ,q) (format "(~a \\rightarrow ~a)" (formula->latex p) (formula->latex q))]
