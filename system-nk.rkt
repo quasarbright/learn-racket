@@ -524,7 +524,20 @@ The list of inference trees is the sub-proofs
                (Sequence I)))))))
 
 ; macros for formulae
-(define-syntax-rule (fresh (x ...) body ...) (let ([x (gensym 'x)] ...) body ...))
+(define-syntax-rule
+  (fresh (x ...) body ...)
+  (let ([x (mk-fresh-var 'x)] ...) body ...))
+(define fresh-counter 0)
+; {symbol?} -> symbol?
+; generate a fresh variable name.
+; different calls to this procedure will never be equal? to each other.
+; can optionally pass in base name.
+(define (mk-fresh-var [base-name '_])
+  (set! fresh-counter (add1 fresh-counter))
+  (mk-var base-name fresh-counter))
+; symbol? natural? -> symbol?
+(define (mk-var x n) (format-symbol "~a:~a" x n))
+
 (define (disj p q) (list 'or p q))
 (define (conj p q) (list 'and p q))
 (define (=> p q) (list '=> p q))
@@ -1077,7 +1090,11 @@ The list of inference trees is the sub-proofs
 (define (formula->latex p)
   (match p
     ; TODO bottom, top, re-sugar neg?
-    [(? symbol?) (symbol->string p)]
+    [(? symbol?)
+     (match (regexp-match #px"^(.*):(\\d*)$" (symbol->string p))
+       [(list _ name number)
+        (format "~a_~a" name number)]
+       [_ (symbol->string p)])]
     [`(not ,p) (format "(\\neg ~a)" (formula->latex p))]
     [`(and ,p ,q) (format "(~a \\wedge ~a)" (formula->latex p) (formula->latex q))]
     [`(or ,p ,q) (format "(~a \\vee ~a)" (formula->latex p) (formula->latex q))]
