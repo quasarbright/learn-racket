@@ -37,6 +37,25 @@
 ;
 
 ; A Context is a (listof Formula) representing formulae that are assumed to be true
+; First one is most recent.
+
+; TODO replace hard-coded list and cons and stuff with these
+
+; Formula ... -> Context
+(define (context . ps) ps)
+
+; Formula Context -> boolean?
+; TODO this is inefficient. maybe just alpha-normalize during extension and here.
+(define (in-context? p ctx)
+  (member p ctx alpha-eqv?))
+
+; Context Formula ... -> Context
+(define (extend-context ctx . ps)
+  (union-contexts ps ctx))
+
+; Context ... -> Context
+(define (union-contexts . ctxs)
+  (apply append ctxs))
 
 ; A Judgement is written in math like
 ; ctx |- p
@@ -367,6 +386,42 @@ The list of inference trees is the sub-proofs
      (or (eq? x a) (occurs-free? x p))]
     [(cons op ps)
      (for/or ([p ps]) (occurs-bound? x p))]))
+
+; Formula Formula {(hash-of symbol? symbol?) (hash-of symbol? symbol?)} -> boolean?
+; Does there exist a renaming of bound variables that makes
+; the two formulae equal?
+; The two hashes map bound vars to gensyms.
+(define (alpha-eqv? p q [pvars (hasheq)] [qvars (hasheq)])
+  (match* (p q)
+    [((? symbol?) (? symbol?))
+     (eq? (hash-ref pvars p p)
+          (hash-ref qvars q q))]
+    [((list quantifier a p) (list quantifier b q))
+     #:when (member quantifier '(forall exists))
+     (define v (gensym))
+     (alpha-eqv? p q (hash-set pvars a v) (hash-set qvars b v))]
+    [((cons op ps) (cons op qs))
+     #:when (eq? (length ps) (length qs))
+     (for/and ([p ps] [q qs])
+       (alpha-eqv? p q pvars qvars))]
+    [(_ _) #f]))
+
+(module+ test
+  (check-true (alpha-eqv? 'a 'a))
+  (check-false (alpha-eqv? 'a 'b))
+  (check-true (alpha-eqv? (forall a a) (forall b b)))
+  (check-true (alpha-eqv? (exists a a) (exists b b)))
+  (check-false (alpha-eqv? (forall a a) (exists b b)))
+  (check-true (alpha-eqv? (forall (a b) (=> a b))
+                          (forall (b c) (=> b c))))
+  (check-false (alpha-eqv? (forall (a b) (=> a b))
+                           (forall (b c) (disj b c))))
+  (check-false (alpha-eqv? (forall (a b) (=> a b))
+                           (forall (b b) (=> b b))))
+  (check-false (alpha-eqv? (forall (b b) (=> b b))
+                           (forall (a b) (=> a b))))
+  (check-false (alpha-eqv? (forall (a b) (=> a b))
+                           (forall (a b) (=> b a)))))
 
 (define proof-with-cuts
   `(()
