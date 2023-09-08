@@ -8,6 +8,8 @@
 ; the machine can increment, decrement, and check whether a counter is zero. that's it
 ; it also has a state machine like a turing machine for rules
 
+(module+ test (require rackunit))
+
 ; a MachineInstruction is one of
 (struct label [name] #:transparent)
 ; where name is a symbol
@@ -30,22 +32,23 @@
 ; A MachineProgram is a (listof MachineInstruction)
 
 ; A VirtualMachine is a
-(struct virtual-machine [counters instructions (pc #:mutable)])
+(struct virtual-machine [counters instructions (pc #:mutable)] #:transparent)
 ; where
 ; counters is a mutable hash from symbol to natural
 ; instructions is a MachineProgram
-; pc is a natural, representing the index of the current instruction
+; pc is a natural, representing the index of the current instruction (program counter)
 
 ; I thought of having pc just be a counter, but that doesn't really make sense bc
 ; you're not supposed to be able to look at the number of a counter
 
-; VirtualMachine -> void
-; run a machine program to completion
-(define (run-machine-program vm)
+; VirtualMachine -> (hash/c symbol natural)
+; run a machine program to completion, return counters
+(define (run-machine-program! vm)
   (let loop ()
     (unless (virtual-machine-done? vm)
       (virtual-machine-step! vm)
-      (loop))))
+      (loop)))
+  (virtual-machine-counters vm))
 
 ; VirtualMachine -> boolean
 ; is the virtual machine done running?
@@ -63,9 +66,143 @@
     [(inc counter)
      (virtual-machine-counter-transform! vm counter add1)]
     [(dec counter)
-     (virtual-machine-counter-transform! vm counter add1)]
+     (virtual-machine-counter-transform! vm counter sub1)]
     [(j label-name)
-     (virtual-machine-set-pc! vm (virtual-machine-label-index vm label-name))]
+     (set-virtual-machine-pc! vm (virtual-machine-label-index vm label-name))]
     [(jz counter label-name)
      (when (virtual-machine-counter-zero? vm counter)
-       (virtual-machine-set-pc! vm (virtual-machine-label-index vm label-name)))]))
+       (set-virtual-machine-pc! vm (virtual-machine-label-index vm label-name)))]))
+
+; VirtualMachine -> MachineInstruction
+(define (virtual-machine-current-instruction vm)
+  (list-ref (virtual-machine-instructions vm) (virtual-machine-pc vm)))
+
+; VirtualMachine -> void
+(define (virtual-machine-increment-pc! vm)
+  (set-virtual-machine-pc! vm (add1 (virtual-machine-pc vm))))
+
+; VirtualMachine symbol (natural -> natural) -> void
+; apply the function to the counter. should either be increment or decrement
+(define (virtual-machine-counter-transform! vm counter proc)
+  (hash-set! (virtual-machine-counters vm)
+             counter
+             ; max 0 to prevent negatives
+             (max 0 (proc (hash-ref (virtual-machine-counters vm) counter 0)))))
+
+; VirtualMachine symbol -> boolean
+(define (virtual-machine-counter-zero? vm counter)
+  (zero? (hash-ref (virtual-machine-counters vm) counter 0)))
+
+; VirtualMachine symbol -> natural
+; index of the label instruction with the given name
+(define (virtual-machine-label-index vm label-name)
+  (or (index-of (virtual-machine-instructions vm) (label label-name))
+      (error 'run-machine-program "unknown label: ~a" label-name)))
+
+#|
+optimizations:
+- cache label indices
+|#
+
+(module+ test
+  (test-equal?
+   "clear"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10)))
+     (list (label 'start)
+           (jz 'a 'end)
+           (dec 'a)
+           (j 'start)
+           (label 'end))
+     0))
+   (make-hash '((a . 0))))
+  (test-equal?
+   "move"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 0)))
+     (list (label 'start)
+           (jz 'a 'end)
+           (dec 'a)
+           (inc 'b)
+           (j 'start)
+           (label 'end))
+     0))
+   (make-hash '((a . 0) (b . 10))))
+  (test-equal?
+   "copy"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 0)))
+     (list (label 'start-a->temp)
+           (jz 'a 'end-a->temp)
+           (dec 'a)
+           (inc 'temp)
+           (j 'start-a->temp)
+           (label 'end-a->temp)
+           (label 'start-temp->ab)
+           (jz 'temp 'end)
+           (dec 'temp)
+           (inc 'a)
+           (inc 'b)
+           (j 'start-temp->ab)
+           (label 'end))
+     0))
+   (make-hash '((a . 10) (b . 10) (temp . 0)))))
+
+; instruction "macros"
+
+; (listof MachineInstruction) -> (listof MachineInstruction)
+; use this to sequence instructions. supports nested sequences
+(define (sequence . instructions)
+  ; if it's sequences all the way down, shallow flattening here is fine
+  (foldr (lambda (instruction instructions)
+           (if (list? instruction)
+               (append instruction instructions)
+               (cons instruction instructions)))
+         '()
+         instructions))
+
+; set counter to 0
+(define (clear counter)
+  (define start (gensym 'clear-start))
+  (define end (gensym 'clear-end))
+  (sequence (label start)
+            (jz counter end)
+            (dec counter)
+            (j start)
+            (label end)))
+
+; clear from and add its contents to to
+(define (transfer to from)
+  (define start (gensym 'transfer-start))
+  (define end (gensym 'transfer-end))
+  (sequence (label start)
+            (jz from end)
+            (dec from)
+            (inc to)
+            (j start)
+            (label end)))
+
+; clear from and set to to its value
+(define (move to from)
+  (clear to)
+  (transfer to from))
+
+; copy from to to. clears to
+(define (copy to from)
+  ; assumes copy-temp is 0
+  (define start (gensym 'copy-start))
+  (define end (gensym 'copy-end))
+  (sequence (clear to)
+            (transfer copy-temp from)
+            (label start)
+            (jz copy-temp end)
+            (dec copy-temp)
+            (inc to)
+            (inc from)
+            (j start)
+            (label end)))
+; can be reused since it's zero between uses
+(define copy-temp (gensym 'copy-temp))
