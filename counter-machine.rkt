@@ -30,11 +30,42 @@
 ; A MachineProgram is a (listof MachineInstruction)
 
 ; A VirtualMachine is a
-(struct virtual-machine [counters instructions pc])
+(struct virtual-machine [counters instructions (pc #:mutable)])
 ; where
 ; counters is a mutable hash from symbol to natural
-; instructions is a Program
+; instructions is a MachineProgram
 ; pc is a natural, representing the index of the current instruction
 
 ; I thought of having pc just be a counter, but that doesn't really make sense bc
 ; you're not supposed to be able to look at the number of a counter
+
+; VirtualMachine -> void
+; run a machine program to completion
+(define (run-machine-program vm)
+  (let loop ()
+    (unless (virtual-machine-done? vm)
+      (virtual-machine-step! vm)
+      (loop))))
+
+; VirtualMachine -> boolean
+; is the virtual machine done running?
+(define (virtual-machine-done? vm)
+  (>= (virtual-machine-pc vm) (length (virtual-machine-instructions vm))))
+
+; VirtualMachine -> void
+; run the current instruction
+(define (virtual-machine-step! vm)
+  (define current-instruction (virtual-machine-current-instruction vm))
+  (virtual-machine-increment-pc! vm)
+  (match current-instruction
+    [(label name)
+     (void)]
+    [(inc counter)
+     (virtual-machine-counter-transform! vm counter add1)]
+    [(dec counter)
+     (virtual-machine-counter-transform! vm counter add1)]
+    [(j label-name)
+     (virtual-machine-set-pc! vm (virtual-machine-label-index vm label-name))]
+    [(jz counter label-name)
+     (when (virtual-machine-counter-zero? vm counter)
+       (virtual-machine-set-pc! vm (virtual-machine-label-index vm label-name)))]))
