@@ -102,6 +102,9 @@
 #|
 optimizations:
 - cache label indices
+- garbage collection?
+  - make a graph of labels and jumps, very naive. labels are associated with counters referenced in their "blocks". reachability analysis.
+    jumps far back screw you with this approach.
 |#
 
 (module+ test
@@ -178,31 +181,130 @@ optimizations:
 (define (transfer to from)
   (define start (gensym 'transfer-start))
   (define end (gensym 'transfer-end))
-  (sequence (label start)
-            (jz from end)
-            (dec from)
-            (inc to)
-            (j start)
-            (label end)))
+  (if (eq? to from)
+      (sequence)
+      (sequence (label start)
+                (jz from end)
+                (dec from)
+                (inc to)
+                (j start)
+                (label end))))
 
 ; clear from and set to to its value
 (define (move to from)
-  (clear to)
-  (transfer to from))
+  (if (eq? to from)
+      (sequence)
+      (sequence
+       (clear to)
+       (transfer to from))))
 
 ; copy from to to. clears to
 (define (copy to from)
-  ; assumes copy-temp is 0
-  (define start (gensym 'copy-start))
-  (define end (gensym 'copy-end))
-  (sequence (clear to)
-            (transfer copy-temp from)
-            (label start)
-            (jz copy-temp end)
-            (dec copy-temp)
-            (inc to)
-            (inc from)
-            (j start)
-            (label end)))
+  (cond
+    [(eq? to from)
+     (sequence)]
+    [else
+     ; assumes copy-temp is 0
+     (define start (gensym 'copy-start))
+     (define end (gensym 'copy-end))
+     (sequence (clear to)
+               (transfer copy-temp from)
+               (label start)
+               (jz copy-temp end)
+               (dec copy-temp)
+               (inc to)
+               (inc from)
+               (j start)
+               (label end))]))
 ; can be reused since it's zero between uses
 (define copy-temp (gensym 'copy-temp))
+
+(define (add to a b)
+  (define start (gensym 'add-start))
+  (define end (gensym 'add-end))
+  ; TODO this breaks if to == b
+  (sequence (copy to a)
+            (copy add-temp b)
+            (transfer to add-temp)))
+(define add-temp (gensym 'add-temp))
+
+; a *= b
+(define (multiply to a b)
+  ; add b to to a times
+  (sequence (copy multiply-temp a)
+            ; the clear needs to happen after the copy in case to == a
+            (clear to)
+            (repeat-and-decrement-until-empty
+             multiply-temp
+             (add to to b))))
+(define multiply-temp (gensym 'multiply-temp))
+
+(define (subtract to a b)
+  ; decrement b times
+  (sequence (copy to a)
+            (copy subtract-temp b)
+            (repeat-and-decrement-until-empty
+             subtract-temp
+             (dec to))))
+(define subtract-temp (gensym 'subtract-temp))
+
+; loop as many times as the number the counter holds, clears the counter
+; instructions can be a sequence or an individual instruction
+; decrements after loop body
+(define (repeat-and-decrement-until-empty counter instructions)
+  (define start (gensym 'repeat-and-decrement-until-empty-start))
+  (define end (gensym 'repeat-and-decrement-until-empty-end))
+  (sequence (label start)
+            (jz counter end)
+            instructions
+            (dec counter)
+            (j start)
+            (label end)))
+
+(define (divide to-quotient to-remainder a b)
+  (define start (gensym 'divide-start))
+  (define end (gensym 'divide-end))
+  ; subtract b from a until a < b, count how many times
+  ; final difference is remainder
+  (sequence (copy to-remainder a)
+            (clear to-quotient)
+            (label start)
+            (jl a b end)
+            (inc to-quotient)
+            (subtract to-remainder to-remainder b)
+            (j start)
+            (label end)))
+
+; jump if a <= b
+(define (jle a b label-name)
+  (sequence (subtract jle-temp a b)
+            (jz jle-temp label-name)))
+(define jle-temp (gensym 'jle-temp))
+
+; jump if a < b
+(define (jl a b label-name)
+  (define maybe (gensym 'jl-maybe))
+  (define dont (gensym 'jl-dont))
+  (sequence (jle a b maybe)
+            (j dont)
+            (label maybe)
+            (jle b a dont); they're equal
+            (j label-name)
+            (label dont)))
+
+; jump if a = b
+(define (je a b label-name)
+  (define maybe (gensym 'je-maybe))
+  (define dont (gensym 'je-dont))
+  (sequence (jle a b maybe)
+            (j dont)
+            (label maybe)
+            (jle b a label-name)
+            (label dont)))
+
+; jump if counter != 0
+(define (jnz label-name)
+  (define dont (gensym 'jnz-dont))
+  (sequence (jz dont)
+            (j label-name)
+            (label dont)))
