@@ -177,6 +177,16 @@ optimizations:
             (j start)
             (label end)))
 
+(module+ test
+  (test-equal?
+   "clears"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (sequence (sequence (sequence (clear 'a)) (clear 'b)))
+     0))
+   (make-hash '((a . 0) (b . 0) (c . 30)))))
+
 ; clear from and add its contents to to
 (define (transfer to from)
   (define start (gensym 'transfer-start))
@@ -190,6 +200,24 @@ optimizations:
                 (j start)
                 (label end))))
 
+(module+ test
+  (test-equal?
+   "basic transfer"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (transfer 'a 'b)
+     0))
+   (make-hash '((a . 30) (b . 0) (c . 40))))
+  (test-equal?
+   "transfer to self"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (transfer 'a 'a)
+     0))
+   (make-hash '((a . 10) (b . 20) (c . 40)))))
+
 ; clear from and set to to its value
 (define (move to from)
   (if (eq? to from)
@@ -197,6 +225,24 @@ optimizations:
       (sequence
        (clear to)
        (transfer to from))))
+
+(module+ test
+  (test-equal?
+   "basic move"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (move 'a 'b)
+     0))
+   (make-hash '((a . 20) (b . 0) (c . 40))))
+  (test-equal?
+   "move to self"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (move 'a 'a)
+     0))
+   (make-hash '((a . 10) (b . 20) (c . 40)))))
 
 ; copy from to to. clears to
 (define (copy to from)
@@ -219,34 +265,141 @@ optimizations:
 ; can be reused since it's zero between uses
 (define copy-temp (gensym 'copy-temp))
 
+(module+ test
+  (test-equal?
+   "basic copy"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (copy 'a 'b)
+     0))
+   (make-hash `((a . 20) (b . 20) (c . 40) (,copy-temp . 0))))
+  (test-equal?
+   "copy to self"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (copy 'a 'a)
+     0))
+   (make-hash '((a . 10) (b . 20) (c . 40)))))
+
 (define (add to a b)
   (define start (gensym 'add-start))
   (define end (gensym 'add-end))
-  ; TODO this breaks if to == b
-  (sequence (copy to a)
-            (copy add-temp b)
+  (sequence (copy add-temp b)
+            (copy to a)
             (transfer to add-temp)))
 (define add-temp (gensym 'add-temp))
+
+(module+ test
+  (test-equal?
+   "basic add"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (add 'a 'b 'c)
+     0))
+   (make-hash `((a . 50) (b . 20) (c . 30) (,add-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "add to self left"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (add 'a 'a 'c)
+     0))
+   (make-hash `((a . 40) (b . 20) (c . 30) (,add-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "add to self right"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (add 'a 'c 'a)
+     0))
+   (make-hash `((a . 40) (b . 20) (c . 30) (,add-temp . 0) (,copy-temp . 0)))))
 
 ; a *= b
 (define (multiply to a b)
   ; add b to to a times
-  (sequence (copy multiply-temp a)
+  (sequence (copy multiply-temp-a a)
+            (copy multiply-temp-b b)
             ; the clear needs to happen after the copy in case to == a
             (clear to)
             (repeat-and-decrement-until-empty
-             multiply-temp
-             (add to to b))))
-(define multiply-temp (gensym 'multiply-temp))
+             multiply-temp-a
+             (add to to multiply-temp-b))
+            ; not actually necessary
+            (clear multiply-temp-b)))
+(define multiply-temp-a (gensym 'multiply-temp-a))
+(define multiply-temp-b (gensym 'multiply-temp-b))
+
+(module+ test
+  (test-equal?
+   "basic multiply"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (multiply 'a 'b 'c)
+     0))
+   (make-hash `((a . 600) (b . 20) (c . 30) (,multiply-temp-a . 0) (,multiply-temp-b . 0) (,add-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "multiply to self left"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (multiply 'a 'a 'c)
+     0))
+   (make-hash `((a . 300) (b . 20) (c . 30) (,multiply-temp-a . 0) (,multiply-temp-b . 0) (,add-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "multiply to self right"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 30)))
+     (multiply 'a 'c 'a)
+     0))
+   (make-hash `((a . 300) (b . 20) (c . 30) (,multiply-temp-a . 0) (,multiply-temp-b . 0) (,add-temp . 0) (,copy-temp . 0)))))
 
 (define (subtract to a b)
   ; decrement b times
-  (sequence (copy to a)
-            (copy subtract-temp b)
+  (sequence (copy subtract-temp b)
+            (copy to a)
             (repeat-and-decrement-until-empty
              subtract-temp
              (dec to))))
 (define subtract-temp (gensym 'subtract-temp))
+
+(module+ test
+  (test-equal?
+   "basic subtract"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 70) (c . 30)))
+     (subtract 'a 'b 'c)
+     0))
+   (make-hash `((a . 40) (b . 70) (c . 30) (,subtract-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "subtract 3 10"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 3) (c . 10)))
+     (subtract 'a 'b 'c)
+     0))
+   (make-hash `((a . 0) (b . 3) (c . 10) (,subtract-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "subtract from self left"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 70) (b . 20) (c . 30)))
+     (subtract 'a 'a 'c)
+     0))
+   (make-hash `((a . 40) (b . 20) (c . 30) (,subtract-temp . 0) (,copy-temp . 0))))
+  (test-equal?
+   "subtract from self right"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 30) (b . 20) (c . 70)))
+     (subtract 'a 'c 'a)
+     0))
+   (make-hash `((a . 40) (b . 20) (c . 70) (,subtract-temp . 0) (,copy-temp . 0)))))
 
 ; loop as many times as the number the counter holds, clears the counter
 ; instructions can be a sequence or an individual instruction
@@ -266,20 +419,101 @@ optimizations:
   (define end (gensym 'divide-end))
   ; subtract b from a until a < b, count how many times
   ; final difference is remainder
-  (sequence (copy to-remainder a)
+  (sequence (copy divide-temp b)
+            (copy to-remainder a)
             (clear to-quotient)
             (label start)
-            (jl a b end)
+            (jl to-remainder divide-temp end)
             (inc to-quotient)
-            (subtract to-remainder to-remainder b)
+            (subtract to-remainder to-remainder divide-temp)
             (j start)
-            (label end)))
+            (label end)
+            ; not actually necessary
+            (clear divide-temp)))
+(define divide-temp (gensym 'divide-temp))
+
+(module+ test
+  (test-equal?
+   "basic divide"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((quot . 100) (b . 36) (c . 10) (rem . 999)))
+     (divide 'quot 'rem 'b 'c)
+     0))
+   (make-hash `((quot . 3) (b . 36) (c . 10) (rem . 6) (,subtract-temp . 0) (,copy-temp . 0) (,jle-temp . 4) (,divide-temp . 0))))
+  (test-equal?
+   "divide 0 10"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((quot . 100) (b . 0) (c . 10) (rem . 999)))
+     (divide 'quot 'rem 'b 'c)
+     0))
+   (make-hash `((quot . 0) (b . 0) (c . 10) (rem . 0) (,subtract-temp . 0) (,copy-temp . 0) (,jle-temp . 10) (,divide-temp . 0))))
+  (test-equal?
+   "divide 10 10"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((quot . 100) (b . 10) (c . 10) (rem . 999)))
+     (divide 'quot 'rem 'b 'c)
+     0))
+   (make-hash `((quot . 1) (b . 10) (c . 10) (rem . 0) (,subtract-temp . 0) (,copy-temp . 0) (,jle-temp . 10) (,divide-temp . 0))))
+  (test-equal?
+   "divide 7 10"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((quot . 100) (b . 7) (c . 10) (rem . 999)))
+     (divide 'quot 'rem 'b 'c)
+     0))
+   (make-hash `((quot . 0) (b . 7) (c . 10) (rem . 7) (,subtract-temp . 0) (,copy-temp . 0) (,jle-temp . 3) (,divide-temp . 0))))
+  (test-equal?
+   "divide by self left"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 70) (b . 10)))
+     (divide 'a 'rem 'a 'b)
+     0))
+   (make-hash `((a . 7) (b . 10) (rem . 0) (,subtract-temp . 0) (,copy-temp . 0) (,jle-temp . 10) (,divide-temp . 0))))
+  (test-equal?
+   "divide by self right"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 70)))
+     (divide 'a 'rem 'b 'a)
+     0))
+   (make-hash `((a . 7) (b . 70) (rem . 0) (,subtract-temp . 0) (,copy-temp . 0) (,jle-temp . 10) (,divide-temp . 0)))))
 
 ; jump if a <= b
 (define (jle a b label-name)
   (sequence (subtract jle-temp a b)
             (jz jle-temp label-name)))
 (define jle-temp (gensym 'jle-temp))
+
+(module+ test
+  (test-equal?
+   "jle jump"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20)))
+     (sequence (jle 'a 'b 'jumped)
+               (j 'end)
+               (label 'jumped)
+               (inc 'a)
+               (label 'end))
+     0))
+   (make-hash `((a . 11) (b . 20) (,copy-temp . 0) (,subtract-temp . 0) (,jle-temp . 0))))
+  (test-equal?
+   "jle don't jump"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 30) (b . 20)))
+     (sequence (jle 'a 'b 'jumped)
+               (inc 'a)
+               (j 'end)
+               (label 'jumped)
+               (inc 'b)
+               (label 'end))
+     0))
+   (make-hash `((a . 31) (b . 20) (,copy-temp . 0) (,subtract-temp . 0) (,jle-temp . 10)))))
 
 ; jump if a < b
 (define (jl a b label-name)
@@ -291,6 +525,46 @@ optimizations:
             (jle b a dont); they're equal
             (j label-name)
             (label dont)))
+
+(module+ test
+  (test-equal?
+   "jl jump"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20)))
+     (sequence (jl 'a 'b 'jumped)
+               (j 'end)
+               (label 'jumped)
+               (inc 'a)
+               (label 'end))
+     0))
+   (make-hash `((a . 11) (b . 20) (,copy-temp . 0) (,subtract-temp . 0) (,jle-temp . 10))))
+  (test-equal?
+   "jl don't jump eq"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 30) (b . 30)))
+     (sequence (jl 'a 'b 'jumped)
+               (inc 'a)
+               (j 'end)
+               (label 'jumped)
+               (inc 'b)
+               (label 'end))
+     0))
+   (make-hash `((a . 31) (b . 30) (,copy-temp . 0) (,subtract-temp . 0) (,jle-temp . 0))))
+  (test-equal?
+   "jl don't jump >"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 40) (b . 30)))
+     (sequence (jl 'a 'b 'jumped)
+               (inc 'a)
+               (j 'end)
+               (label 'jumped)
+               (inc 'b)
+               (label 'end))
+     0))
+   (make-hash `((a . 41) (b . 30) (,copy-temp . 0) (,subtract-temp . 0) (,jle-temp . 10)))))
 
 ; jump if a = b
 (define (je a b label-name)
