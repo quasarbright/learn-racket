@@ -283,6 +283,30 @@ optimizations:
      0))
    (make-hash '((a . 10) (b . 20) (c . 40)))))
 
+(define (swap a b)
+  (sequence (transfer swap-temp a)
+            (transfer a b)
+            (transfer b swap-temp)))
+(define swap-temp (gensym 'swap-temp))
+
+(module+ test
+  (test-equal?
+   "basic swap"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (swap 'a 'b)
+     0))
+   (make-hash `((a . 20) (b . 10) (c . 40) (,swap-temp . 0))))
+  (test-equal?
+   "swap with self"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((a . 10) (b . 20) (c . 40)))
+     (swap 'a 'a)
+     0))
+   (make-hash `((a . 10) (b . 20) (c . 40) (,swap-temp . 0)))))
+
 (define (add to a b)
   (define start (gensym 'add-start))
   (define end (gensym 'add-end))
@@ -495,7 +519,7 @@ optimizations:
     (virtual-machine
      (make-hash '((a . 10) (b . 20)))
      (sequence (jle 'a 'b 'jumped)
-               (j 'end)
+               (j 'end)
                (label 'jumped)
                (inc 'a)
                (label 'end))
@@ -582,3 +606,78 @@ optimizations:
   (sequence (jz dont)
             (j label-name)
             (label dont)))
+
+; nth fibonacci number, where f0 = 0, f1 = 1
+(define (fib to n)
+  (define start (gensym 'fib-start))
+  (define end (gensym 'fib-end))
+  ; to is fn, prev is fn-1
+  (sequence (copy fib-temp-n n)
+            (clear to)
+            ; if n == 0, return 0
+            (jz fib-temp-n end)
+            (clear fib-temp-prev)
+            ; f1 = 1
+            (inc to)
+            (dec fib-temp-n)
+            (label start)
+            (jz fib-temp-n end)
+            ; prev, curr = curr, curr + prev
+            (swap to fib-temp-prev)
+            (add to to fib-temp-prev)
+            (dec fib-temp-n)
+            (j start)
+            (label end)))
+(define fib-temp-n (gensym 'fib-temp-n))
+(define fib-temp-prev (gensym 'fib-temp-prev))
+
+(module+ test
+  (test-equal?
+   "fib 0"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((n . 0)))
+     (fib 'to 'n)
+     0))
+   ; to is zero since it doesn't exist!
+   (make-hash `((n . 0))))
+  (test-equal?
+   "fib 1"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((n . 1)))
+     (fib 'to 'n)
+     0))
+   (make-hash `((n . 1) (to . 1) (,copy-temp . 0) (,fib-temp-n . 0))))
+  (test-equal?
+   "fib 2"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((n . 2)))
+     (fib 'to 'n)
+     0))
+   (make-hash `((n . 2) (to . 1) (,copy-temp . 0) (,fib-temp-n . 0) (,fib-temp-prev . 1) (,swap-temp . 0) (,add-temp . 0))))
+  (test-equal?
+   "fib 3"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((n . 3)))
+     (fib 'to 'n)
+     0))
+   (make-hash `((n . 3) (to . 2) (,copy-temp . 0) (,fib-temp-n . 0) (,fib-temp-prev . 1) (,swap-temp . 0) (,add-temp . 0))))
+  (test-equal?
+   "fib 4"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((n . 4)))
+     (fib 'to 'n)
+     0))
+   (make-hash `((n . 4) (to . 3) (,copy-temp . 0) (,fib-temp-n . 0) (,fib-temp-prev . 2) (,swap-temp . 0) (,add-temp . 0))))
+  (test-equal?
+   "fib 5"
+   (run-machine-program!
+    (virtual-machine
+     (make-hash '((n . 5)))
+     (fib 'to 'n)
+     0))
+   (make-hash `((n . 5) (to . 5) (,copy-temp . 0) (,fib-temp-n . 0) (,fib-temp-prev . 3) (,swap-temp . 0) (,add-temp . 0)))))
