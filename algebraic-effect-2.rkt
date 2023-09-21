@@ -23,11 +23,20 @@
          (with-effect-handler proc E[(perform val)]) => (proc val (lambda (x) (with-effect-handler proc E[x])))
          ; where E has no with-effect-handler
          |#
-         with-effect-handler)
+         with-effect-handler
+         ; wrapper for creating simple algebraic effects
+         ; ex:
+         #;
+         (define-algebraic-effect math
+           [(plus1 v k) (k (add1 v))]
+           [(minus1 v k) (k (sub1 v))])
+         ; usage:
+         #;(equal? (math (list (plus1 2) (minus1 6))) '(3 5))
+         define-algebraic-effect)
 
 ;; dependencies ;;
 
-(require racket/control (for-syntax syntax/parse))
+(require racket/control (for-syntax syntax/parse racket/syntax))
 
 ;; data definitions ;;
 
@@ -196,3 +205,33 @@
                                                   (yield (get)))
                                            (yield 'done)))
                   '(start 0 1 done))))
+
+; TODO add kw-optional transformer for something like generators where you need to manipulate the body?
+; might also want to wrap something around the thunk in rt instead of macro. don't want too many options.
+; maybe just do a runtime thing, and if they want to, they can make their own macro around the default.
+; everything should be expressible as rt wrappers around the thunk.
+(define-syntax define-algebraic-effect
+  (syntax-parser
+    [(_ name:id
+        [(effect-name:id v:id k:id)
+         body ...]
+        ...)
+     (define/syntax-parse tag (format-id #'name "~a-tag" (syntax-e #'name)))
+     #'(begin
+         (define tag (make-continuation-prompt-tag 'tag))
+         (define-syntax-rule (name body^ (... ...)) (proc (lambda () body^ (... ...))))
+         (define (proc thnk) (with-effect-handler handler #:tag tag (thnk)))
+         (define (handler v^ k^)
+           (match v^
+             [`(effect-name ,v) (let ([k k^]) body ...)]
+             ...))
+         (define (effect-name v^) (perform `(effect-name ,v^) #:tag tag))
+         ...)]))
+
+(module+ test
+  (let ()
+    (define-algebraic-effect math
+      [(plus1 v k) (k (add1 v))]
+      [(minus1 v k) (k (sub1 v))])
+    (check-equal? (math (list (plus1 2) (minus1 6)))
+                  '(3 5))))
