@@ -225,6 +225,9 @@
          (define (effect-name v^) (perform `(effect-name ,v^) #:tag tag))
          ...)]))
 
+; TODO zero and multi-argument effects
+; TODO better error message when no prompt available
+
 (module+ test
   (let ()
     (define-algebraic-effect math

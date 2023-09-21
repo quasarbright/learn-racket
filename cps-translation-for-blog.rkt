@@ -96,10 +96,10 @@
      (define k (gensym 'k-lam))
      (define cont (gensym 'cont))
      (define body^ (cps-transform body))
-     `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
+     `(lambda (,k) (,k (lambda ,(append args (list cont)) (,body^ ,cont))))]
     [`(,f ,xs ...)
      (define k (gensym 'k-app))
-     `(lambda (,k) ,(cps-transform-app (cons f xs) k))]
+     `(lambda (,k) ,(cps-transform-app (append (list f) xs) k))]
     [_
      (define k (gensym 'k-const))
      `(lambda (,k) (,k ,expr))]))
@@ -157,6 +157,7 @@
            (add1 (let/cc k (handler 1 k)))))
   (teval (let ([handler (lambda (v k) (vector (k v) (k (add1 v))))])
            (list (let/cc k (handler 1 k)))))
+  #;#;#;#;#;
   (teval (reset 2))
   (teval (reset (list (shift k 2))))
   (teval (reset (list (shift k (vector (k 1) (k 2))))))

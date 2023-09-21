@@ -7,7 +7,8 @@
 ; To get the essence of this, look at the rules for lambda, application, call/cc, shift, and reset in cps-transform
 
 (module+ test (require rackunit))
-(require racket/control)
+(require racket/control
+         "algebraic-effect-2.rkt")
 
 (define (all-but-last lst)
   (reverse (rest (reverse lst))))
@@ -91,9 +92,7 @@
      '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
-     (define expr^ (cps-transform expr))
-     (define v (gensym 'v-set!))
-     `(lambda (,k) (,expr^ (lambda (,v) (,k (set! ,x ,v)))))]
+     `(lambda (,k) ,(with-binding `(,k (set! ,x ,(bind expr)))))]
     ['add1
      `(lambda (k-add1) (k-add1 (lambda (n cont) (cont (add1 n)))))]
     ['list
@@ -102,16 +101,13 @@
      '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
     [`(if ,cnd ,thn ,els)
      (define k (gensym 'k-if))
-     (define vcnd (gensym 'v-cnd))
-     (define cnd^ (cps-transform cnd))
      (define thn^ (cps-transform thn))
      (define els^ (cps-transform els))
      `(lambda (,k)
-        (,cnd^
-         (lambda (,vcnd)
-           (if ,vcnd
-               (,thn^ ,k)
-               (,els^ ,k)))))]
+        ,(with-binding
+           `(if ,(bind cnd)
+                (,thn^ ,k)
+                (,els^ ,k))))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
      (define cont (gensym 'cont))
@@ -119,47 +115,39 @@
      `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
     [`(,f ,xs ...)
      (define k (gensym 'k-app))
-     `(lambda (,k) ,(cps-transform-app (cons f xs) k))]
+     `(lambda (,k) ,(with-binding (append (map bind (cons f xs)) (list k))))]
     [_
      (define k (gensym 'k-const))
      `(lambda (,k) (,k ,expr))]))
 
-; translate function application to cps
-; Example:
-#;{ (cps-transform-app (list f x y) '() k)
-    ->
-    (lambda (k)
-      (f^
-       (λ (vf)
-         (x^
-          (λ (vx)
-            (y^
-             (λ (vy)
-               (vf vx vy k))))))))}
-;; It's like monadic bind, or callbacks
-;; (CPS f) gives you a callback which is like
-;; "What do you want to do with this?"
-;; And you say "I want to do (lambda (vf) ...)"
-;; And in the end, you call the function value
-;; with all the arguments and the outer k,
-;; since functions take in a continuation
-; (list-of core-expr) symbol -> cps-expr
-(define (cps-transform-app exprs k)
-  (define exprs^ (map cps-transform exprs))
-  (define vs (map (lambda (_) (gensym 'v-app)) exprs))
-  (foldr (lambda (expr^ v body) `(,expr^ (lambda (,v) ,body)))
-         (append vs (list k))
-         exprs^
-         vs))
+; transforms and binds the expressions according to cps.
+; bind adds a binding around the inner result and returns the variable it gets bound to.
+; Ex:
+#;(with-binding (f (bind e1) (bind e2)))
+;~>
+#;`(,e1^
+    (lambda (v1)
+      (,e2^
+       (lambda (v2)
+         ,(f 'v1 'v2)))))
+(define-algebraic-effect with-binding
+  ; that's right, we're compiling continuations with continuations!!!
+  [(bind expr k)
+   (define v (gensym 'v-bind))
+   (define expr^ (cps-transform expr))
+   `(,expr^ (lambda (,v) ,(k v)))])
 
 ; TODO lift primitives like +
-; TODO lift higher order stuff like map such that you can do call/cc during map
+; TODO lift higher order stuff like map such that you can do call/cc during map.
+; TODO parameters
 
 (module+ test
   (define-syntax-rule
     (teval expr)
     (check-equal? (eval/cps 'expr) (eval 'expr ns)))
   (teval (let ([x 1]) x))
+  (teval (add1 1))
+  (teval (add1 (add1 (add1 1))))
   (teval (if #t 1 2))
   (teval (if #f 1 2))
   (teval ((lambda (x) (if x 1 2)) #t))
