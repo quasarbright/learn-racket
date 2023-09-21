@@ -206,13 +206,10 @@
                                            (yield 'done)))
                   '(start 0 1 done))))
 
-; TODO add kw-optional transformer for something like generators where you need to manipulate the body?
-; might also want to wrap something around the thunk in rt instead of macro. don't want too many options.
-; maybe just do a runtime thing, and if they want to, they can make their own macro around the default.
-; everything should be expressible as rt wrappers around the thunk.
 (define-syntax define-algebraic-effect
   (syntax-parser
     [(_ name:id
+        (~optional (~seq #:body-wrapper body-wrapper) #:defaults ([body-wrapper #'(lambda (thnk) (thnk))]))
         [(effect-name:id v:id k:id)
          body ...]
         ...)
@@ -220,7 +217,7 @@
      #'(begin
          (define tag (make-continuation-prompt-tag 'tag))
          (define-syntax-rule (name body^ (... ...)) (proc (lambda () body^ (... ...))))
-         (define (proc thnk) (with-effect-handler handler #:tag tag (thnk)))
+         (define (proc thnk) (with-effect-handler handler #:tag tag (body-wrapper thnk)))
          (define (handler v^ k^)
            (match v^
              [`(effect-name ,v) (let ([k k^]) body ...)]
@@ -234,4 +231,10 @@
       [(plus1 v k) (k (add1 v))]
       [(minus1 v k) (k (sub1 v))])
     (check-equal? (math (list (plus1 2) (minus1 6)))
-                  '(3 5))))
+                  '(3 5)))
+  (let ()
+    (define-algebraic-effect generator
+      #:body-wrapper (lambda (thnk) (thnk) empty-stream)
+      [(yield v k) (stream-cons v (k (void)))])
+    (check-equal? (stream->list (generator (yield 1) (yield 2)))
+                  '(1 2))))
