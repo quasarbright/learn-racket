@@ -10,9 +10,6 @@
 ; But that could be implemented with a thread-safe promise queue I think.
 ; You'd just call resolve from a future or whatever.
 
-; TODO something like call/cc. probably needs to be a special case in the desugaring or something,
-; if there is even a way to express that here.
-
 (module+ test (require rackunit))
 (require "./algebraic-effect-2.rkt")
 
@@ -28,6 +25,17 @@
 ; X -> (Promise X)
 ; a promise that immediately resolves to a value
 (define (promise-of v) (promise (lambda (resolve) (resolve v))))
+
+; sort of like call-with-composable-continuation, except it's a promise.
+; calling k doesn't return anything to the callback (i think).
+; calling k doesn't abort.
+; resolve is called with the final result of the body. If you don't want that, use the promise constructor directly.
+(define (call-with-composable-continuation/promise callback)
+  ; basically the promise constructor, but calls resolve on the result of the callback.
+  (promise (lambda (k) (k (callback k)))))
+
+; TODO delimited continuations. seems like it could be done by running a new async.
+; see if you can avoid running though.
 
 ; sequence promises one after the other
 (define (promise-sequence . ps)
@@ -182,6 +190,8 @@
 
 ; Expr -> Expr
 ; desugars async await to promises
+; uses alpha normal form (ANF) https://en.wikipedia.org/wiki/A-normal_form
+; inside async, but await binds variables with promise-then instead of let
 (define (desugar expr)
   (match expr
     [`(async ,exprs ...) (desugar/async* exprs)]
@@ -206,8 +216,6 @@
 
 ; Expr -> Expr
 ; desugar an expression in async
-; uses ANF https://en.wikipedia.org/wiki/A-normal_form
-; but await causes
 (define (desugar/async expr)
   (match expr
     [(cons (or 'await 'lambda 'let) _) (desugar expr)]
@@ -257,3 +265,26 @@
   (teval '(let ([plus1 (lambda (x) (async (+ (await (promise-of 1)) x)))])
             (async (list (await (plus1 1)) (await (plus1 5)))))
          '((2 6))))
+
+; direct implementation of async await as an algebraic effect
+
+(define-algebraic-effect async
+  #:body-wrapper (lambda (thnk) (ensure-promise (thnk)))
+  [(await p k)
+   ; this shows that promises are just CPS
+   (promise-then p k)])
+; comparing this to our anf, the implementation of binding an await looks
+; like an eta expansion of this effect if you squint. this is no coincidence.
+; we don't have to do let-binding anf because the racket compiler "anfs"
+; for us and we're just hooking into continuations. racket actually does
+; cps instead of anf of course, but that accomplishes the same thing as our anf:
+; controlling evaluation order and binding expressions to variables.
+
+(module+ test
+  (check-equal? (promise-run-vs (async 2)) '(2))
+  (check-equal? (promise-run-vs (async (+ 1 (await (promise-of 2)))))
+                '(3))
+  (check-equal? (promise-run-vs
+                 (let ([plus1 (lambda (x) (async (+ (await (promise-of 1)) x)))])
+                   (async (list (await (plus1 1)) (await (plus1 5))))))
+                '((2 6))))
