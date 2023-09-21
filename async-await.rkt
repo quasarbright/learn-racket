@@ -26,16 +26,15 @@
 ; a promise that immediately resolves to a value
 (define (promise-of v) (promise (lambda (resolve) (resolve v))))
 
-; sort of like call-with-composable-continuation, except it's a promise.
-; calling k doesn't return anything to the callback (i think).
+; sort of like shift, except it's a promise.
+; calling k doesn't return anything to the callback in my current runners.
 ; calling k doesn't abort.
-; resolve is called with the final result of the body. If you don't want that, use the promise constructor directly.
-(define (call-with-composable-continuation/promise callback)
+; k is called with the final result of the body. If you don't want that, use the promise constructor directly.
+; In a sense, these continuations are delimited to the enclosing async, so
+; (await (async ...)) is reset
+(define (shift/promise callback)
   ; basically the promise constructor, but calls resolve on the result of the callback.
   (promise (lambda (k) (k (callback k)))))
-
-; TODO delimited continuations. seems like it could be done by running a new async.
-; see if you can avoid running though.
 
 ; sequence promises one after the other
 (define (promise-sequence . ps)
@@ -217,57 +216,56 @@
 ; Expr -> Expr
 ; desugar an expression in async
 (define (desugar/async expr)
-  (match expr
-    [(cons (or 'await 'lambda 'let) _) (desugar expr)]
-    [`(await ,expr) (desugar expr)]
-    [`(if ,cnd ,thn ,els) (anf `(if ,(bind cnd) ,(bind thn) ,(bind els)))]
-    ; application
-    [(? cons? exprs) (anf (map bind exprs))]
-    ; variable/constant
-    [_ expr]))
+  ; we use continuations to translate to ANF, which can be confusing.
+  ; But the code is concise, at least.
+  ; we are building a nesting of bindings to simple things and then something simple in the inner body
+  ; 'if' is an exception to this, but it's fine.
+  ; the bind effects add a binding (either a let binding or a promise-then lambda binding) around
+  ; the eventual answer and return the variable that the expression gets bound to.
+  ; Only bind to simple expressions (ones that don't have an await that we need to deal with).
+  ; loop desugars an expression, adding bindings around us, and returns what it gets bound to.
+  ; if it's a complicated expression use loop. if its simple, use a bind effect.
+  (anf (let loop ([expr expr])
+         (match expr
+           [`(let ([,x ,rhs]) ,body)
+            ; TODO handle multiple bodies
+            (lift (list x (loop rhs)))
+            (loop body)]
+           [(cons 'lambda _)
+            (let-bind (desugar expr))]
+           [`(await ,expr)
+            (promise-bind (loop expr))]
+           [`(if ,cnd ,thn ,els)
+            ; this is cheating but whatever
+            ; you either have to cheat, or thread what comes next into both branches or something
+            ; you could make a new effect ig, but avoid duplicating what comes next.
+            ; I think the effect would need to loop lol
+            (promise-bind `(if ,(loop cnd) ,(desugar `(async ,thn)) ,(desugar `(async ,els))))]
+           ; application
+           [(? cons? exprs)
+            (let-bind (map loop exprs))]
+           ; variable/constant, await, lambda, or let
+           [_ expr]))))
 
 ; I think this is what they do in "compiling with continuations".
 ; generates an expression that binds the subexpressions you bind
 ; and replaces each call to bind with the name the expression gets bound to.
 ; Example:
-; (anf (f (bind expr))) ~> `(let ([x ,expr]) ,(f 'x))
+; (anf (f (let-bind expr))) ~> `(let ([x ,expr]) ,(f 'x))
 (define-algebraic-effect anf
-  ; variables don't get re-bound, awaits are bound by promise-then, others are let-bound
-  [(bind expr k)
+  [(let-bind expr k)
    (match expr
-    [(? symbol? x) (k x)]
-    [`(await ,expr)
-     (define x (gensym 'ax))
-     `(promise-then ,(desugar expr) (lambda (,x) (ensure-promise ,(k x))))]
-    [_
-     (define x (gensym 'sx))
-     `(let ([,x ,expr]) ,(k x))])])
-
-(module+ test
-  (check-equal? (anf 'foo) 'foo)
-  (check-match (anf (bind '(f 2)))
-               `(let ([,x (f 2)])
-                  ,x))
-  (check-match (anf (bind '(await (promise-of 2))))
-               `(promise-then (promise-of 2) (lambda (,x) (ensure-promise ,x))))
-  (check-match (anf `(if ,(bind '(f 2)) ,(bind '(f 3)) ,(bind '(f 4))))
-               `(let ([,x (f 2)])
-                  (let ([,y (f 3)])
-                    (let ([,z (f 4)])
-                      (if ,x ,y ,z))))))
-
-(module+ test
-  ; expect a list of all resolved values
-  (define-syntax-rule (teval expr vs)
-    (check-equal? (promise-run-vs (ensure-promise (eval/async expr))) vs))
-  (teval '(async (+ (await (promise-of 2)) 3))
-         '(5))
-  (teval '(let ([plus1 (lambda (x) (async (+ (await (promise-of 1)) x)))])
-            (async (list (await (plus1 1)) (await (plus1 5)))))
-         '((2 6)))
-  (teval '(let ([plus1 (lambda (x) (async (+ (await (async 1)) x)))])
-            (async (list (await (plus1 1)) (await (plus1 5)))))
-         '((2 6))))
+     [(? cons?)
+      (define x (gensym 'let-x))
+      `(let ([,x ,(desugar expr)]) ,(k x))]
+     ; it's a constant, don't bother
+     [_ (k expr)])]
+  [(promise-bind expr k)
+   (define x (gensym 'then-x))
+   `(promise-then ,(desugar expr) (lambda (,x) (ensure-promise ,(k x))))]
+  ; call with (list var constant)
+  [(lift binding k)
+   `(let (,binding) ,(k (first binding)))])
 
 ; direct implementation of async await as an algebraic effect
 
@@ -284,10 +282,36 @@
 ; controlling evaluation order and binding expressions to variables.
 
 (module+ test
-  (check-equal? (promise-run-vs (async 2)) '(2))
-  (check-equal? (promise-run-vs (async (+ 1 (await (promise-of 2)))))
-                '(3))
-  (check-equal? (promise-run-vs
-                 (let ([plus1 (lambda (x) (async (+ (await (promise-of 1)) x)))])
-                   (async (list (await (plus1 1)) (await (plus1 5))))))
-                '((2 6))))
+  ; expect a list of all resolved values
+  ; tests the sexpr implementation and the direct implementation
+  (define-syntax-rule (teval expr vs)
+    (begin
+      (check-equal? (promise-run-vs (ensure-promise expr)) vs)
+      (check-equal? (promise-run-vs (ensure-promise (eval/async 'expr))) vs)))
+  (teval (async (+ (await (promise-of 2)) 3))
+         '(5))
+  (teval (let ([plus1 (lambda (x) (async (+ (await (promise-of 1)) x)))])
+            (async (list (await (plus1 1)) (await (plus1 5)))))
+         '((2 6)))
+  ; use async instead of promise-of
+  (teval (let ([plus1 (lambda (x) (async (+ (await (async 1)) x)))])
+            (async (list (await (plus1 1)) (await (plus1 5)))))
+         '((2 6)))
+  ; simple if with await cnd
+  (teval (async (if (await (async #t)) 1 (/ 1 0)))
+         '(1))
+  ; await in an if
+  (teval (async (if (await (async #t)) (await (async 1)) (/ 1 0)))
+         '(1))
+  ; await in an if in a call
+  (teval (async (add1 (if (await (async #t)) (await (async 1)) (/ 1 0))))
+         '(2))
+  ; deep await
+  (teval (async (add1 (add1 (* (await (async 3)) 5))))
+         '(17))
+  ; await in await
+  (teval (async (+ 1 (await (promise-of (await (async 2))))))
+         '(3))
+  ; let in async
+  (teval (async (+ (let ([x (await (async 1))]) (+ x (await (async 2)))) 3))
+         '(6)))
