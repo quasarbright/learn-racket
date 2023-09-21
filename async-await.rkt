@@ -238,7 +238,7 @@
     [(? symbol? x) (k x)]
     [`(await ,expr)
      (define x (gensym 'ax))
-     `(promise-then ,expr (lambda (,x) (ensure-promise ,(k x))))]
+     `(promise-then ,(desugar expr) (lambda (,x) (ensure-promise ,(k x))))]
     [_
      (define x (gensym 'sx))
      `(let ([,x ,expr]) ,(k x))])])
@@ -263,6 +263,9 @@
   (teval '(async (+ (await (promise-of 2)) 3))
          '(5))
   (teval '(let ([plus1 (lambda (x) (async (+ (await (promise-of 1)) x)))])
+            (async (list (await (plus1 1)) (await (plus1 5)))))
+         '((2 6)))
+  (teval '(let ([plus1 (lambda (x) (async (+ (await (async 1)) x)))])
             (async (list (await (plus1 1)) (await (plus1 5)))))
          '((2 6))))
 
