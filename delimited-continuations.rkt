@@ -57,7 +57,7 @@
          (lambda (f k)
            (f (lambda (val cont) (k val))
               k))))]
-    #;['call/cc/use
+    ['call-with-composable-continuation
      ; the difference is we actually use cont on the result of k
      ; so k doesn't abort
      '(lambda (k-cc)
@@ -144,7 +144,10 @@
 (module+ test
   (define-syntax-rule
     (teval expr)
-    (check-equal? (eval/cps 'expr) (eval 'expr ns)))
+    ; when you eval something with call/cc, the context outside of the eval is included!
+    ; this includes the check-equal?
+    ; so we need to wrap it in a prompt
+    (check-equal? (eval/cps 'expr) (eval `(call-with-continuation-prompt (lambda () expr)) ns)))
   (teval (let ([x 1]) x))
   (teval (add1 1))
   (teval (add1 (add1 (add1 1))))
@@ -154,6 +157,8 @@
   (teval (call/cc (lambda (k) 2)))
   (teval (call/cc (lambda (k) (k 2))))
   (teval (call/cc (lambda (k) (let ([x 1] [y (k 3)]) x))))
+  (teval (add1 (add1 (call-with-composable-continuation (lambda (k) (k 0))))))
+  (teval (add1 (add1 (call-with-composable-continuation (lambda (k) (k (k 0)))))))
   (teval (let ([x 3] [k (let/cc k k)])
            (if k (k #f) x)))
   (teval (let ([x 2]) (set! x 3) x))
@@ -169,7 +174,8 @@
   (teval (reset (list (shift k 2))))
   (teval (reset (list (shift k (vector (k 1) (k 2))))))
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
-  (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3)))))
+  (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3))))
+  (displayln "got to the end"))
 
 #|
 playing with parameters and shift reset:
