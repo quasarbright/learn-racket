@@ -204,4 +204,16 @@ playing with parameters and shift reset:
 ; k restores the parameterization context of the enclosing reset
 > (k 1)
 '(1 reset)
+
+
+Racket implements parameters in terms of continuation marks. A continuation can be split into frames, which I think are just the nested lambdas.
+As we evaluate, we wrap and unwrap continuations, pushing and popping frames. I think.
+Anyway, a continuation mark is a key-value pair, and a continuation frame is associated with a set of continuation marks. It's a key-value store on a frame.
+For something like parameters, we'd want child continuations to inherit the parameter mark from its parent, or some way to go "up the stack" to find a value for the mark.
+Frames get added (continuations get wrapped) during applications, or generally when using/evaluating exprs, and removed (continuations get applied) when evaluating constants.
+
+Idea for implementation: Instead of pure lambdas, continuations are structs with prop:procedure, and they have marks. When you wrap a continuation, inherit the marks,
+unless you're a special form like parameterize which manipulates them. (wrap-continuation k (lambda (v) ...something-with-k...)) creates a continuation from
+the lambda which inherits the marks from k.
+Inheritance is tricky though. Think through an example with an application. It may not be this simple.
 |#
