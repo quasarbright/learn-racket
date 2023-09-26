@@ -216,4 +216,44 @@ Idea for implementation: Instead of pure lambdas, continuations are structs with
 unless you're a special form like parameterize which manipulates them. (wrap-continuation k (lambda (v) ...something-with-k...)) creates a continuation from
 the lambda which inherits the marks from k.
 Inheritance is tricky though. Think through an example with an application. It may not be this simple.
+
+(f (parameterize ([p 1]) (g (p))) y)
+
+(lambda (k) ([f] (lambda (vf) ([(parameterize ([p 1]) (g (p)))] (lambda (x) ([y] (lambda (y) (vf x y k))))))))
+
+parameterize can just put the mark on the continuation it passes to the body.
+getting the value later is the tricky bit
+
+(lambda (k) ((lambda (kf) (kf f)) (lambda (vf) ([(parameterize ([p 1]) (g (p)))] (lambda (x) ((lambda (ky) (ky y)) (vf x y k)))))))
+
+[(parameterize ([p 1]) (g (p)))]
+(lambda (kparam) ([1] (lambda (one) (let ([k^ (continuation-set-mark kparam p one)]) ([(g (p))] k^)))))
+(lambda (kparam) ([1] (lambda (one) (let ([k^ (continuation-set-mark kparam p one)])
+                                      ((lambda (kapp) ([g] (lambda (vg) ([(p)] (lambda (vget) (vg vget kapp))))))
+                                       k^)))))
+
+[(p)] needs to get the mark from its continuation
+the continuation that (p) gets is the (lambda (vget) ...), but the one with the mark is kapp.
+
+instead of plain lambda for continuations, do (wrap-continuation k (lambda (v) ...)). Then (p) will get a continuation with markings.
+
+p needs to be
+(case-lambda
+  [(k) (k (continuation-get-mark k p))]
+  [(v k) (continuation-set-mark! k p v) (k (void))])
+
+I was worried about this mutation spreading too much, but actually, I think it might not spread far enough. Nobody will see the mutated mapping because everything copies.
+Idea:
+marks map to boxes
+wrap-continuation just passes the mapping directly, no copying
+continuation-set-mark (parameterize) creates a new hash which replaces the parameter's box with a new one
+continuation-set-mark! (p v) mutates the box
+
+I'm worried about a situation where we save a continuation, mutate a parameter, and then jump back to before the mutation.
+Should it have the old value, or the new value? see what racket does.
+
+
+what if continuations took in a value and a mark mapping instead of storing it? then, we wouldn't need mutation. from p, int the (p v) case, we could just
+call k with a modified mapping. That would behave differently in that weird jump-to-before-mutation case, so if the other strategy doesn't match racket behavior, think about this one.
+
 |#
