@@ -52,28 +52,38 @@
      ; k is the continuation for the call/cc application (the current continuation)
      ; val is the value to "continue" with
      ; cont is the continuation for the application of k (ignored)
-     '(lambda (k-cc)
+     '(lambda (k-cc ps-cc)
         (k-cc
-         (lambda (f k)
-           (f (lambda (val cont) (k val))
-              k))))]
+         (lambda (f k ps)
+           (f (lambda (val cont ps^) (k val ps))
+              k
+              ps))
+         ps-cc))]
     ['call-with-composable-continuation
      ; the difference is we actually use cont on the result of k
      ; so k doesn't abort
-     '(lambda (k-cc)
+     '(lambda (k-cc ps-cc)
         (k-cc
-         (lambda (f k)
-           (f (lambda (val cont) (cont (k val)))
-              k))))]
+         (lambda (f k ps)
+           (f (lambda (val cont ps^) (cont (k val ps) ps^))
+              k
+              ps))
+         ps-cc))]
     [`(reset ,expr)
      ; stole rules from https://www.deinprogramm.de/sperber/papers/shift-reset-direct.pdf
      ; I had reset right, but shift was a little off.
      (define k (gensym 'k-reset))
+     (define ps (gensym 'ps-reset))
      (define expr^ (cps-transform expr))
-     `(lambda (,k)
-        (,k (,expr^ identity)))]
+     `(lambda (,k ,ps)
+        (let-values ([(v ps^)
+                      (,expr^ values ,ps)])
+          (,k v ps^)))]
     [`(shift ,user-k ,expr)
      (define k (gensym 'k-shift))
+     (define ps (gensym 'ps-shift))
+     (define v (gensym 'v-shift))
+     (define ps^ (gensym 'ps^-shift))
      (define expr^ (cps-transform expr))
      ; k is the continuation of the shift expression.
      ; user-k is the identifier in the source program which we bind to the delimited current continuation.
@@ -83,23 +93,27 @@
      ; We call cont on (,k val) so calling user-k doesn't escape the shift.
      ; We give apply expr^ to identity so the final result of the shift escapes out to the reset.
      ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
-     `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) identity))]
-    [`(dynamic-wind ,pre-thunk-expr ,value-thunk-expr ,post-thunk-expr)
-
-     'todo]
+     `(lambda (,k ,ps) ((let ([,user-k (lambda (val cont ps^)
+                                         (cont (,k val ps) ps^))])
+                          ,expr^)
+                        values
+                        ,ps))]
     ['void
      ; if they define a variable called void, this will break
-     '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
+     '(lambda (k-void ps-void) (k-void (lambda args (match args ([(list args ... k ps) (k (void) ps)])))
+                                       ps-void))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
+     ; TODO ps
      `(lambda (,k) ,(with-binding `(,k (set! ,x ,(bind expr)))))]
     ['add1
-     `(lambda (k-add1) (k-add1 (lambda (n cont) (cont (add1 n)))))]
+     `(lambda (k-add1 ps-add1) (k-add1 (lambda (n cont ps) (cont (add1 n) ps)) ps-add1))]
     ['list
-     '(lambda (k-list) (k-list (lambda args ((last args) (all-but-last args)))))]
+     '(lambda (k-list ps-list) (k-list (lambda args (match args ([(list args ... k ps) (k args ps)]))) ps-list))]
     ['vector
-     '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
+     '(lambda (k-vector ps-vector) (k-vector (lambda args (match args ([(list args ... k ps) (k (list->vector args) ps)]))) ps-vector))]
     [`(if ,cnd ,thn ,els)
+     ; TODO ps
      (define k (gensym 'k-if))
      (define thn^ (cps-transform thn))
      (define els^ (cps-transform els))
@@ -110,15 +124,24 @@
                 (,els^ ,k))))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
+     (define ps (gensym 'ps-lam))
+     (define ps^ (gensym 'ps^-lam))
      (define cont (gensym 'cont))
      (define body^ (cps-transform body))
-     `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
+     `(lambda (,k ,ps) (,k (lambda (,@args ,cont ,ps^) (,body^ ,cont ,ps^)) ,ps))]
     [`(,f ,xs ...)
+     ; TODO ps
      (define k (gensym 'k-app))
      `(lambda (,k) ,(with-binding (append (map bind (cons f xs)) (list k))))]
     [_
      (define k (gensym 'k-const))
-     `(lambda (,k) (,k ,expr))]))
+     (define ps (gensym 'ps-const))
+     `(lambda (,k ,ps) (,k ,expr ,ps))]))
+
+(define current-ps (make-parameter #f))
+
+; left off here about to make a macro to take in ps and parameterize around with-binding.
+; then bind will thread it and parameterize and the caller can just get the parameter
 
 ; transforms and binds the expressions according to cps.
 ; bind adds a binding around the inner result and returns the variable it gets bound to.
@@ -320,9 +343,11 @@ This is getting weird. what does it look like with marks?
 
 TODO what happens if you do (shift k (parameterize ... (k ...)))? And how does this play with mutation?
 
-[p] = (case-lambda
-        [(k ps)   (k (hash-ref ps p) ps)]
-        [(v k ps) (k (void)          (hash-set ps p v))])
+[(make-parameter default)] = (case-lambda
+                               [(k ps)   (k (hash-ref ps p default) ps)]
+                               [(v k ps) (k (void)                  (hash-set ps p v))])
+CPS default expr ofc, just took a shortcut here in the rule
+
 [(parameterize ([p e^]) e)] = (lambda (k ps) ([e^] (lambda (v^ ps^) ([e] k (hash-set ps^ p v^))) ps))
 TODO test for mutating a parameter in e^. test mutating p and mutating not p. mutating not p should be seen in e
 
