@@ -252,8 +252,83 @@ continuation-set-mark! (p v) mutates the box
 I'm worried about a situation where we save a continuation, mutate a parameter, and then jump back to before the mutation.
 Should it have the old value, or the new value? see what racket does.
 
+> (define p (make-parameter 1))
+> (p)
+1
+> (let () (define k (let/cc k k)) (displayln (p)) (p (add1 (p))) (when k (k #f)))
+1
+2
+
+The mutation persists after the jump.
+
+But also,
+
+> (define p (make-parameter 1))
+> (define saved-k #f)
+> (let () (let/cc k (set! saved-k k) (void)) (p))
+1
+> (parameterize ([p 2]) (saved-k (void)))
+1
+
+TODO tests for these
+
+continuations remember the parameterization that was present
 
 what if continuations took in a value and a mark mapping instead of storing it? then, we wouldn't need mutation. from p, int the (p v) case, we could just
-call k with a modified mapping. That would behave differently in that weird jump-to-before-mutation case, so if the other strategy doesn't match racket behavior, think about this one.
+call k with a modified mapping.
+
+This should handle the jump to before mutation thing, I don't think it's compatible with continuations remembering their parameterization at the same time.
+I'll have to be carefull with the call/cc rewrite, might be able to make it work.
+
+Could also do something in between. Automate the passing of a hash from parameters to boxes. Sounds equivalent, but might behave slightly differently.
+But if continuations are kept in correspondence with their parameterizations, it should be the same, I think. User-accessible continuations will close
+over the appropriate parameterization, so it's like a continuation mark.
+
+- a parameterization is a mapping from parameters to their current value. can use hasheq
+- a parameter is just its (CPS-land) procedure, can make a struct wrapper if you want. it's a case lambda for the getter and setter.
+- expressions are translated to (lambda (k ps) ...) where k is called on the result and the new parameterization, usually just ps.
+ps is the parameterization to evaluate the expression under
+- continuations take in a value and a parameterization. the meaning is "what to do with the answer and the parameterization to do it under"
+
+[x] = (lambda (k ps) (k x ps))
+
+[(lambda (x) e)] = (lambda (k ps) (k (lambda (x cont ps^) ([e] cont ps^)) ps))
+the lambda gets called with the current parameterization ps^. we evaluate the body under this parameterization.
+
+[(e1 e2)] = (lambda (k ps) ([e1] (lambda (v1 ps1) ([e2] (lambda (v2 ps2) (v1 v2 k ps2)) ps1)) ps))
+thinking about this:
+we evaluate e1 under ps. when it's done, it will call our 1 continuation with its value v1 and a new parameterization ps1.
+then, we evaluate e2 under ps1. when it's done, it will call our 2 continuation with its value v2 and a new parameterization ps2.
+Finally, we apply the function, passing it k and ps2, so the actual function body will run under ps2.
+
+[call/cc] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (k val ps)) ps)) ps-cc))
+ps is the parameterization for the application of call/cc. ps^ is the parameterization for the application of k in f. Since k jumps to
+the call/cc application's context, it should use the old parameterization ps.
+
+[call-with-composable-continuation] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (cont (k val ps) ps^)) ps)) ps-cc))
+same thing but (cont (k val ps) ps^)
+
+[(reset e)] = (lambda (k ps) (let-values ([(v ps^) ([e] (lambda (x ps^) (values v ps^)) ps)]) (k v ps^)))
+e runs under ps, but its continuation is sandboxed. This breaks the continuation-parameterization correspondence.
+TODO Need to maintain the final parameterization from the body though. Is this right?
+TODO Will this play nice with call/cc inside reset?
+
+[(shift user-k e)] = (lambda (k ps) ((let ([user-k (lambda (val cont ps^) (cont (k val ps) ps^))]) [e]) (lambda (x ps^^) (values x ps^^)) ps))
+e runs under ps, but its continuation escapes to the reset. This breaks the continuation-parameterization correspondence.
+TODO Need to maintain the final parameterization from the body though. Is this right?
+This is getting weird. what does it look like with marks?
+
+TODO what happens if you do (shift k (parameterize ... (k ...)))? And how does this play with mutation?
+
+[p] = (case-lambda
+        [(k ps)   (k (hash-ref ps p) ps)]
+        [(v k ps) (k (void)          (hash-set ps p v))])
+[(parameterize ([p e^]) e)] = (lambda (k ps) ([e^] (lambda (v^ ps^) ([e] k (hash-set ps^ p v^))) ps))
+TODO test for mutating a parameter in e^. test mutating p and mutating not p. mutating not p should be seen in e
+
+steps:
+- add parameterization passing, but no forms that use it. get old tests passing
+- get parameters working without mutation
+- get mutation working, maybe use boxes
 
 |#
