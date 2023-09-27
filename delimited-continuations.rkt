@@ -18,7 +18,7 @@
 
 ; expr -> value
 (define (eval/cps expr)
-  ((eval (cps-transform (desugar expr)) ns) identity))
+  ((eval (cps-transform (desugar expr)) ns) (lambda (x ps) x) 'totally-a-parameterization))
 
 ; desugar into core language
 ; expr -> core-expr
@@ -82,8 +82,6 @@
     [`(shift ,user-k ,expr)
      (define k (gensym 'k-shift))
      (define ps (gensym 'ps-shift))
-     (define v (gensym 'v-shift))
-     (define ps^ (gensym 'ps^-shift))
      (define expr^ (cps-transform expr))
      ; k is the continuation of the shift expression.
      ; user-k is the identifier in the source program which we bind to the delimited current continuation.
@@ -94,34 +92,34 @@
      ; We give apply expr^ to identity so the final result of the shift escapes out to the reset.
      ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
      `(lambda (,k ,ps) ((let ([,user-k (lambda (val cont ps^)
-                                         (cont (,k val ps) ps^))])
+                                         (cont (,k val ,ps) ps^))])
                           ,expr^)
                         values
                         ,ps))]
     ['void
      ; if they define a variable called void, this will break
-     '(lambda (k-void ps-void) (k-void (lambda args (match args ([(list args ... k ps) (k (void) ps)])))
+     '(lambda (k-void ps-void) (k-void (lambda args (match args [(list args ... k ps) (k (void) ps)]))
                                        ps-void))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
-     ; TODO ps
-     `(lambda (,k) ,(with-binding `(,k (set! ,x ,(bind expr)))))]
+     (define ps (gensym 'ps-set!))
+     `(lambda (,k ,ps) ,(with-binding ps `(,k (set! ,x ,(bind expr)) (current-ps))))]
     ['add1
      `(lambda (k-add1 ps-add1) (k-add1 (lambda (n cont ps) (cont (add1 n) ps)) ps-add1))]
     ['list
-     '(lambda (k-list ps-list) (k-list (lambda args (match args ([(list args ... k ps) (k args ps)]))) ps-list))]
+     '(lambda (k-list ps-list) (k-list (lambda args (match args [(list args ... k ps) (k args ps)])) ps-list))]
     ['vector
-     '(lambda (k-vector ps-vector) (k-vector (lambda args (match args ([(list args ... k ps) (k (list->vector args) ps)]))) ps-vector))]
+     '(lambda (k-vector ps-vector) (k-vector (lambda args (match args [(list args ... k ps) (k (list->vector args) ps)])) ps-vector))]
     [`(if ,cnd ,thn ,els)
-     ; TODO ps
      (define k (gensym 'k-if))
+     (define ps (gensym 'ps-if))
      (define thn^ (cps-transform thn))
      (define els^ (cps-transform els))
-     `(lambda (,k)
-        ,(with-binding
+     `(lambda (,k ,ps)
+        ,(with-binding ps
            `(if ,(bind cnd)
-                (,thn^ ,k)
-                (,els^ ,k))))]
+                (,thn^ ,k ,(current-ps))
+                (,els^ ,k ,(current-ps)))))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
      (define ps (gensym 'ps-lam))
@@ -132,7 +130,8 @@
     [`(,f ,xs ...)
      ; TODO ps
      (define k (gensym 'k-app))
-     `(lambda (,k) ,(with-binding (append (map bind (cons f xs)) (list k))))]
+     (define ps (gensym 'ps-app))
+     `(lambda (,k ,ps) ,(with-binding ps (append (map bind (cons f xs)) (list k (current-ps)))))]
     [_
      (define k (gensym 'k-const))
      (define ps (gensym 'ps-const))
@@ -143,22 +142,31 @@
 ; left off here about to make a macro to take in ps and parameterize around with-binding.
 ; then bind will thread it and parameterize and the caller can just get the parameter
 
+(define-syntax-rule (with-binding ps body ...) (with-binding^ (parameterize ([current-ps ps]) body ...)))
+
 ; transforms and binds the expressions according to cps.
 ; bind adds a binding around the inner result and returns the variable it gets bound to.
+; also takes care of ps using current-ps
 ; Ex:
+; TODO add ps to example
 #;(with-binding (f (bind e1) (bind e2)))
 ;~>
 #;`(,e1^
-    (lambda (v1)
+    (lambda (v1 ps1)
       (,e2^
-       (lambda (v2)
-         ,(f 'v1 'v2)))))
-(define-algebraic-effect with-binding
+       (lambda (v2 ps2)
+         ,(f 'v1 'v2)) ; with ps2 as current-ps
+       ps1))
+    ps)
+(define-algebraic-effect with-binding^
   ; that's right, we're compiling continuations with continuations!!!
+  ; and we're compiling parameters with parameters!
   [(bind expr k)
    (define v (gensym 'v-bind))
+   (define ps (current-ps))
+   (define ps^ (gensym 'ps^-bind))
    (define expr^ (cps-transform expr))
-   `(,expr^ (lambda (,v) ,(k v)))])
+   `(,expr^ (lambda (,v ,ps^) ,(parameterize ([current-ps ps^]) (k v))) ,ps)])
 
 ; TODO lift primitives like +
 ; TODO lift higher order stuff like map such that you can do call/cc during map.
@@ -195,10 +203,40 @@
            (list (let/cc k (handler 1 k)))))
   (teval (reset 2))
   (teval (reset (list (shift k 2))))
+  (teval (reset (add1 (shift k (k (k 0))))))
   (teval (reset (list (shift k (vector (k 1) (k 2))))))
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
   (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3))))
   (displayln "got to the end"))
+
+; go ahead, find the bug
+#;
+(lambda (k-reset47319 ps-reset47320)
+   (let-values (((v ps^)
+                 ((lambda (k-app47321 ps-app47322)
+                    ((lambda (k-add1 ps-add1) (k-add1 (lambda (n cont ps) (cont (add1 n) ps)) ps-add1))
+                     (lambda (v-bind47323 ps^-bind47324)
+                       ((lambda (k-shift47327 ps-shift47328)
+                          ((let ((k (lambda (val cont ps^) (cont (k-shift47327 val ps-shift47328) ps^))))
+                             (lambda (k-app47329 ps-app47330)
+                               ((lambda (k-const47333 ps-const47334) (k-const47333 k ps-const47334))
+                                (lambda (v-bind47331 ps^-bind47332)
+                                  ((lambda (k-app47337 ps-app47338)
+                                     ((lambda (k-const47341 ps-const47342) (k-const47341 k ps-const47342))
+                                      (lambda (v-bind47339 ps^-bind47340)
+                                        ((lambda (k-const47345 ps-const47346) (k-const47345 0 ps-const47346)) (lambda (v-bind47343 ps^-bind47344) (v-bind47339 v-bind47343 k-app47337 ps-app47338)) ps^-bind47340))
+                                      ps^-bind47332))
+                                   (lambda (v-bind47335 ps^-bind47336) (v-bind47331 v-bind47335 k-app47329 ps-app47330))
+                                   ps^-bind47332))
+                                ps^-bind47324)))
+                           values
+                           ps-shift47328))
+                        (lambda (v-bind47325 ps^-bind47326) (v-bind47323 v-bind47325 k-app47321 ps-app47322))
+                        ps^-bind47324))
+                     #f))
+                  values
+                  ps-reset47320)))
+     (k-reset47319 v ps^)))
 
 #|
 playing with parameters and shift reset:
@@ -316,13 +354,21 @@ ps is the parameterization to evaluate the expression under
 [x] = (lambda (k ps) (k x ps))
 
 [(lambda (x) e)] = (lambda (k ps) (k (lambda (x cont ps^) ([e] cont ps^)) ps))
-the lambda gets called with the current parameterization ps^. we evaluate the body under this parameterization.
+the lambda gets called with under the parameterization ps^. we evaluate the body under this parameterization.
 
 [(e1 e2)] = (lambda (k ps) ([e1] (lambda (v1 ps1) ([e2] (lambda (v2 ps2) (v1 v2 k ps2)) ps1)) ps))
 thinking about this:
 we evaluate e1 under ps. when it's done, it will call our 1 continuation with its value v1 and a new parameterization ps1.
 then, we evaluate e2 under ps1. when it's done, it will call our 2 continuation with its value v2 and a new parameterization ps2.
 Finally, we apply the function, passing it k and ps2, so the actual function body will run under ps2.
+
+[(make-parameter default)] = (case-lambda
+                               [(k ps)   (k (hash-ref ps p default) ps)]
+                               [(v k ps) (k (void)                  (hash-set ps p v))])
+CPS default expr ofc, just took a shortcut here in the rule
+
+[(parameterize ([p e^]) e)] = (lambda (k ps) ([e^] (lambda (v^ ps^) ([e] k (hash-set ps^ p v^))) ps))
+TODO test for mutating a parameter in e^. test mutating p and mutating not p. mutating not p should be seen in e
 
 [call/cc] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (k val ps)) ps)) ps-cc))
 ps is the parameterization for the application of call/cc. ps^ is the parameterization for the application of k in f. Since k jumps to
@@ -342,14 +388,6 @@ TODO Need to maintain the final parameterization from the body though. Is this r
 This is getting weird. what does it look like with marks?
 
 TODO what happens if you do (shift k (parameterize ... (k ...)))? And how does this play with mutation?
-
-[(make-parameter default)] = (case-lambda
-                               [(k ps)   (k (hash-ref ps p default) ps)]
-                               [(v k ps) (k (void)                  (hash-set ps p v))])
-CPS default expr ofc, just took a shortcut here in the rule
-
-[(parameterize ([p e^]) e)] = (lambda (k ps) ([e^] (lambda (v^ ps^) ([e] k (hash-set ps^ p v^))) ps))
-TODO test for mutating a parameter in e^. test mutating p and mutating not p. mutating not p should be seen in e
 
 steps:
 - add parameterization passing, but no forms that use it. get old tests passing
