@@ -345,37 +345,54 @@ Could also do something in between. Automate the passing of a hash from paramete
 But if continuations are kept in correspondence with their parameterizations, it should be the same, I think. User-accessible continuations will close
 over the appropriate parameterization, so it's like a continuation mark.
 
-- a parameterization is a mapping from parameters to their current value. can use hasheq
+- a parameterization is a mapping from parameters to a box of their current value. box is necessary for the (p new-val) mutation.
 - a parameter is just its (CPS-land) procedure, can make a struct wrapper if you want. it's a case lambda for the getter and setter.
-- expressions are translated to (lambda (k ps) ...) where k is called on the result and the new parameterization, usually just ps.
-ps is the parameterization to evaluate the expression under
-- continuations take in a value and a parameterization. the meaning is "what to do with the answer and the parameterization to do it under"
+- expressions are translated to (lambda (k ps) ...) where k is called on the result and ps is the current parameterization
+- continuations don't take in a parameterization
 
-[x] = (lambda (k ps) (k x ps))
+[x] = (lambda (k ps) (k x))
 
-[(lambda (x) e)] = (lambda (k ps) (k (lambda (x cont ps^) ([e] cont ps^)) ps))
+[(lambda (x) e)] = (lambda (k ps) (k (lambda (x cont ps^) ([e] cont ps^))))
 the lambda gets called with under the parameterization ps^. we evaluate the body under this parameterization.
 
-[(e1 e2)] = (lambda (k ps) ([e1] (lambda (v1 ps1) ([e2] (lambda (v2 ps2) (v1 v2 k ps2)) ps1)) ps))
-thinking about this:
-we evaluate e1 under ps. when it's done, it will call our 1 continuation with its value v1 and a new parameterization ps1.
-then, we evaluate e2 under ps1. when it's done, it will call our 2 continuation with its value v2 and a new parameterization ps2.
-Finally, we apply the function, passing it k and ps2, so the actual function body will run under ps2.
+[(e1 e2)] = (lambda (k ps) ([e1] (lambda (v1) ([e2] (lambda (v2) (v1 v2 k ps)) ps)) ps))
 
-[(make-parameter default)] = (case-lambda
-                               [(k ps)   (k (hash-ref ps p default) ps)]
-                               [(v k ps) (k (void)                  (hash-set ps p v))])
-CPS default expr ofc, just took a shortcut here in the rule
+[make-parameter] = (lambda (k^ ps^) (k^ (lambda (v-default k^^) (k^^ (case-lambda [(k ps) (k (parameterization-get ps p v-default))]
+                                                                                  [(v k ps)
+                                                                                   (parameterization-set! ps p v)
+                                                                                   (k (void))])))))
 
-[(parameterize ([p e^]) e)] = (lambda (k ps) ([e^] (lambda (v^ ps^) ([e] k (hash-set ps^ p v^))) ps))
+[(parameterize ([p e^]) e)] = (lambda (k ps) ([e^] (lambda (v^) ([e] k (parameterization-set ps p v^))) ps))
 TODO test for mutating a parameter in e^. test mutating p and mutating not p. mutating not p should be seen in e
 
-[call/cc] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (k val ps)) ps)) ps-cc))
-ps is the parameterization for the application of call/cc. ps^ is the parameterization for the application of k in f. Since k jumps to
-the call/cc application's context, it should use the old parameterization ps.
+[call/cc] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (k val)) ps))))
+ps is the parameterization for the application of call/cc. ps^ is the parameterization for the application of k in f.
 
-[call-with-composable-continuation] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (cont (k val ps) ps^)) ps)) ps-cc))
+[call-with-composable-continuation] = (lambda (k-cc ps-cc) (k-cc (lambda (f k ps) (f (lambda (val cont ps^) (cont (k val))) ps))))
 same thing but (cont (k val ps) ps^)
+
+When you use k, will it run under the right ps? If k just fills in the hole, then the evaluation of (k val) should be under the "outer" parameterization,
+and (cont that) should be under the "inner" parameterization from the body of f. Right?
+
+thinking:
+> (define p (make-parameter 0))
+> (+ (call/cc (lambda (k) (parameterize ([p 1]) (k 9)))) (p))
+9
+
+This will work for sure. But,
+> (reset (+ (shift k (parameterize ([p 1]) (k 9))) (p)))
+10
+
+Pretend shift is call-with-composable-continuation. shift just simplifies by avoiding resuming twice, but it's the same idea.
+
+The key point is that for call/cc, k needs to forget the parameterization and just jump. But for shift and call-with-composable-continuation, k needs to use the call-site's parameterization.
+But these two rewrites handle parameterization the same way: ignoring it! Even if cont "has" ps^, it's too late bc (k val) will already have been evaluated the same way it would in call/cc. one or both are wrong.
+This might mean that continuations need to take in a parameterization.
+
+But that makes no sense everywhere else.
+
+Maybe you need continuation marks after all. But then for parameterize to play nicely with shift, it'll need to change the k's marks or something. Or, in shift, you give k cont's marks.
+With marks, do you need to have exprs take in ps?
 
 [(reset e)] = (lambda (k ps) (let-values ([(v ps^) ([e] (lambda (x ps^) (values v ps^)) ps)]) (k v ps^)))
 e runs under ps, but its continuation is sandboxed. This breaks the continuation-parameterization correspondence.
@@ -393,5 +410,35 @@ steps:
 - add parameterization passing, but no forms that use it. get old tests passing
 - get parameters working without mutation
 - get mutation working, maybe use boxes
+
+
+
+marks:
+
+- continuations have marks. parameter values live in the marks
+- when you use a value, you need to supply a continuation, not just a lambda. That continuation must inherit the marks of the current continuation
+- parameter procedure gets and sets the value using the current continuation
+- parameterize runs the body under a continuation with modified marks
+- a parameter is a procedure, that case lambda. can wrap in a struct if you want, not necessary.
+- in marks, the parameter procedure is mapped to a box. we need a box for mutation. parameterize makes a new box, the procedure set case mutates.
+
+[x] = (lambda (k) (k x))
+
+[(lambda (x) e)] = (lambda (k) (k (lambda (x cont) ([e] cont))))
+
+[(e1 e2)] = (lambda (k) ([e1] (wrap-continuation k (lambda (f) ([e2] (wrap-continuation k (lambda (x) (f x k))))))))
+
+[make-parameter] = (lambda (k) (k (lambda (v-default k^) (k^ (letrec ([p (case-lambda [(cont) (cont (continuation-get-mark cont p v-default))] [(v-new cont) (continuation-set-mark! cont p v-new) (cont (void))])]) p)))))
+
+[(parameterize ([p e-new]) e)] = (lambda (k) ([p] (lambda (vp) ([e-new] (lambda (v-new) ([e] (continuation-set-mark k p v-new)))))))
+TODO test mutating in p^ too lol
+but if it rides along with the continuation, how do we "pop out"? Does parameterize need sandboxing?
+an expr gets the current continuation, which has the current parameterization. but the cc is also what to do with the answer, but when you continue, you don't want the rest of the program to use cc's
+parameterization. But when the expr gets a parameter value, it does a field access on the cc, it doesn't call it. When it calls it, the cc's body doesn't use its own marks, so they're gone. you do pop out.
+
+[call/cc] = (lambda (k-cc) (k-cc (lambda (f k) (f (lambda (val cont) (k val)) k))))
+
+[call-with-composable-continuation] = (lambda (k-cc) (k-cc (lambda (f k) (f (lambda (val cont) (cont ((wrap-continuation cont k) val))) k))))
+
 
 |#
