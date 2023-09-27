@@ -226,6 +226,7 @@
          ...)]))
 
 ; TODO zero and multi-argument effects
+; TODO allow custom macro for name
 ; TODO better error message when no prompt available
 
 (module+ test
