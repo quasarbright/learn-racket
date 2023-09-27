@@ -172,6 +172,30 @@
 ; TODO lift higher order stuff like map such that you can do call/cc during map.
 ; TODO parameters
 
+; runtime
+
+(struct continuation [proc marks] #:property prop:procedure (struct-field-index proc))
+; where
+; proc is a (any/c -> any/c)
+; marks is a hasheq from any/c to any/c
+
+; parameters are implemented by mapping themselves to a box of their current value in the marks.
+
+(define (continuation-get-mark cont key)
+  (hash-ref (continuation-marks cont) key (lambda () (error 'continuation-get-mark "mark not found for key ~a" key))))
+
+(define (continuation-set-mark cont key val)
+  (struct-copy continuation cont [marks (hash-set (continuation-marks cont) key val)]))
+
+(define (continuation-get-parameter cont key)
+  (unbox (continuation-get-mark cont key)))
+
+(define (continuation-set-parameter cont key val)
+  (continuation-set-mark cont key (box val)))
+
+(define (continuation-set-parameter! cont key val)
+  (set-box! (continuation-get-mark cont key) val))
+
 (module+ test
   (define-syntax-rule
     (teval expr)
@@ -208,35 +232,6 @@
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
   (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3))))
   (displayln "got to the end"))
-
-; go ahead, find the bug
-#;
-(lambda (k-reset47319 ps-reset47320)
-   (let-values (((v ps^)
-                 ((lambda (k-app47321 ps-app47322)
-                    ((lambda (k-add1 ps-add1) (k-add1 (lambda (n cont ps) (cont (add1 n) ps)) ps-add1))
-                     (lambda (v-bind47323 ps^-bind47324)
-                       ((lambda (k-shift47327 ps-shift47328)
-                          ((let ((k (lambda (val cont ps^) (cont (k-shift47327 val ps-shift47328) ps^))))
-                             (lambda (k-app47329 ps-app47330)
-                               ((lambda (k-const47333 ps-const47334) (k-const47333 k ps-const47334))
-                                (lambda (v-bind47331 ps^-bind47332)
-                                  ((lambda (k-app47337 ps-app47338)
-                                     ((lambda (k-const47341 ps-const47342) (k-const47341 k ps-const47342))
-                                      (lambda (v-bind47339 ps^-bind47340)
-                                        ((lambda (k-const47345 ps-const47346) (k-const47345 0 ps-const47346)) (lambda (v-bind47343 ps^-bind47344) (v-bind47339 v-bind47343 k-app47337 ps-app47338)) ps^-bind47340))
-                                      ps^-bind47332))
-                                   (lambda (v-bind47335 ps^-bind47336) (v-bind47331 v-bind47335 k-app47329 ps-app47330))
-                                   ps^-bind47332))
-                                ps^-bind47324)))
-                           values
-                           ps-shift47328))
-                        (lambda (v-bind47325 ps^-bind47326) (v-bind47323 v-bind47325 k-app47321 ps-app47322))
-                        ps^-bind47324))
-                     #f))
-                  values
-                  ps-reset47320)))
-     (k-reset47319 v ps^)))
 
 #|
 playing with parameters and shift reset:
@@ -428,11 +423,11 @@ marks:
 
 [(e1 e2)] = (lambda (k) ([e1] (wrap-continuation k (lambda (f) ([e2] (wrap-continuation k (lambda (x) (f x k))))))))
 
-[make-parameter] = (lambda (k) (k (lambda (v-default k^) (k^ (letrec ([p (case-lambda [(cont) (cont (continuation-get-mark cont p v-default))] [(v-new cont) (continuation-set-mark! cont p v-new) (cont (void))])]) p)))))
+[make-parameter] = (lambda (k) (k (lambda (v-default k^) (letrec ([p (case-lambda [(cont) (cont (continuation-get-mark cont p))] [(v-new cont) (continuation-set-mark! cont p v-new) (cont (void))])]) ((continuation-set-mark k^ p v-default) p)))))
 
 [(parameterize ([p e-new]) e)] = (lambda (k) ([p] (lambda (vp) ([e-new] (lambda (v-new) ([e] (continuation-set-mark k p v-new)))))))
 TODO test mutating in p^ too lol
-but if it rides along with the continuation, how do we "pop out"? Does parameterize need sandboxing?
+but if marks ride along with the continuation, how do we "pop out"? Does parameterize need sandboxing?
 an expr gets the current continuation, which has the current parameterization. but the cc is also what to do with the answer, but when you continue, you don't want the rest of the program to use cc's
 parameterization. But when the expr gets a parameter value, it does a field access on the cc, it doesn't call it. When it calls it, the cc's body doesn't use its own marks, so they're gone. you do pop out.
 
@@ -440,5 +435,9 @@ parameterization. But when the expr gets a parameter value, it does a field acce
 
 [call-with-composable-continuation] = (lambda (k-cc) (k-cc (lambda (f k) (f (lambda (val cont) (cont ((wrap-continuation cont k) val))) k))))
 
+[(reset e)] = (lambda (k-reset) (k-reset ([e] (wrap-continuation k-reset identity))))
 
+[(shift user-k e)] = (lambda (k) ((let ([user-k (lambda (val cont) (cont ((wrap-continuation cont k) val)))]) [e]) (wrap-continuation k identity)))
+
+the inner wrapping makes it so applying k in e uses the parameterization from e. the outer wrapping runs e against the shift's parameterization.
 |#
