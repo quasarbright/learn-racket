@@ -447,6 +447,17 @@ can't mutate the marks
 
 having continuations accept a parameterization would solve this, but it doesn't make sense elsewhere.
 
+what actually happens in the current system?
+The current continuation is just something that fills in the hole .
 
+(f (call/cc (lambda (k) (k 2))) (p))
+
+(lambda (k-app) ([f] (wrap-continuation k-app (lambda (vf) ([(call/cc (lambda (k) (k 2)))] (wrap-continuation k-app (lambda (x) ([(p)] (wrap-continuation k-app (lambda (y) (vf x y k-app)))))))))))
+that second wrapped continuation is what the call/cc body will end up calling. so substitute x with 2. the [(p)] still receives a continuation with k-app's marks, and nothing in the control operator can change that
+under the current system.
+
+call/cc will end up working fine (k will "save" the parameterization), but not shift and probably not call-with-composable-continuation either.
+
+read this https://citeseerx.ist.psu.edu/doc/10.1.1.22.7256
 
 |#
