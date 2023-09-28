@@ -443,6 +443,10 @@ the inner wrapping makes it so applying k in e uses the parameterization from e.
 
 just realized that this won't work
 when you wrap in call-with-current-continuation, that doesn't actually do anything bc you're calling k, not passing it. might need to mutate the marks?
+can't mutate the marks
+
+having continuations accept a parameterization would solve this, but it doesn't make sense elsewhere.
+
 
 
 |#
