@@ -440,4 +440,9 @@ parameterization. But when the expr gets a parameter value, it does a field acce
 [(shift user-k e)] = (lambda (k) ((let ([user-k (lambda (val cont) (cont ((wrap-continuation cont k) val)))]) [e]) (wrap-continuation k identity)))
 
 the inner wrapping makes it so applying k in e uses the parameterization from e. the outer wrapping runs e against the shift's parameterization.
+
+just realized that this won't work
+when you wrap in call-with-current-continuation, that doesn't actually do anything bc you're calling k, not passing it. might need to mutate the marks?
+
+
 |#
