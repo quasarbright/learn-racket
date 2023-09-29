@@ -99,6 +99,22 @@
      '(lambda (k-list) (k-list (lambda args ((last args) (all-but-last args)))))]
     ['vector
      '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
+    ['make-parameter
+     '(lambda (k-make-parameter)
+        (k-make-parameter (lambda (v-default k)
+                            (define p
+                              (case-lambda
+                                [(cont) (cont (continuation-get-parameter cont p))]
+                                [(new-val cont)
+                                 (continuation-set-parameter! cont p new-val)
+                                 (cont (void))]))
+                            (k p))))]
+    [`(parameterize ([,e-p ,e-new]) ,e)
+     (define k (gensym 'k-parameterize))
+     `(lambda (,k) ,(with-binding k `(,(cps-transform e-new)
+                                      (continuation-set-parameter ,k
+                                                                  ,(bind e-p)
+                                                                  ,(bind e-new)))))]
     [`(if ,cnd ,thn ,els)
      (define k (gensym 'k-if))
      (define thn^ (cps-transform thn))
@@ -121,7 +137,7 @@
      (define k (gensym 'k-const))
      `(lambda (,k) (,k ,expr))]))
 
-; the name of the current continuation (just a symbol, i'm not cheating!)
+; an expression for the current continuation (just an expression, i'm not cheating!)
 (define current-k (make-parameter #f))
 (define-syntax-rule (with-binding k body ...) (with-binding^ (parameterize ([current-k k]) (with-binding^ body ...))))
 
@@ -210,6 +226,20 @@
   (teval (reset (list (shift k (vector (k 1) (k 2))))))
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
   (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3))))
+  (teval (let ([p (make-parameter 0)])
+           (p)))
+  (teval (let ([p (make-parameter 0)])
+           (parameterize ([p 1]) (p))))
+  ; it's not setting saved-k
+  (teval (let ([saved-k #f]
+                 [p (make-parameter 0)]
+                 [v #f])
+             (parameterize ([p 1])
+               (if (call/cc (lambda (k) (set! saved-k k) #f))
+                   (set! v (p))
+                   (void)))
+             (if v (void) (saved-k #t))
+             v))
   (displayln "got to the end"))
 
 #|
@@ -443,4 +473,19 @@ doesn't talk about implementation
 
 screw this, i'm doing marks and seeing what happens
 
+default value for the parameter doesn't work because it can't leak out without mutation
+this paper is about continuation marks: https://www-old.cs.utah.edu/plt/publications/pldi20-fd.pdf
+actually talks about implementation!
+
+watched this video by matthew flatt about the paper https://www.youtube.com/watch?v=lfxsM4TC8Yw&ab_channel=LFCSSeminar
+looks like it's equivalent to what i'm doing. marks are immutable and associated
+with the continuation, pretty much. it's just that for wrap-continuation, instead of replacing the value and having a single mapping,
+it's a list of mappings, one for each frame. a frame corresponds to a wrapping, but you don't keep the old stuff around.
+
+how does it handle doing a default value then? all we get is the continuation, and all we can do is call it. we don't actually have control over the subsequent
+evaluation.
+is translation-based CPS not capable of expressing this easily? Do I need to make an interpreter?
+if you do, rewatch that video. it has nice pictures for the semantics. an interpreter wouldn't even be that bad, but try to figure out translation
+
+is there some way for continuations to take in marks to run under and not break everything? like an optional argument for cases like this?
 |#
