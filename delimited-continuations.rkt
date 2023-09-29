@@ -18,7 +18,7 @@
 
 ; expr -> value
 (define (eval/cps expr)
-  ((eval (cps-transform (desugar expr)) ns) (lambda (x ps) x) 'totally-a-parameterization))
+  ((eval (cps-transform (desugar expr)) ns) identity))
 
 ; desugar into core language
 ; expr -> core-expr
@@ -52,36 +52,28 @@
      ; k is the continuation for the call/cc application (the current continuation)
      ; val is the value to "continue" with
      ; cont is the continuation for the application of k (ignored)
-     '(lambda (k-cc ps-cc)
+     '(lambda (k-cc)
         (k-cc
-         (lambda (f k ps)
-           (f (lambda (val cont ps^) (k val ps))
-              k
-              ps))
-         ps-cc))]
+         (lambda (f k)
+           (f (lambda (val cont) (k val))
+              k))))]
     ['call-with-composable-continuation
      ; the difference is we actually use cont on the result of k
      ; so k doesn't abort
-     '(lambda (k-cc ps-cc)
+     '(lambda (k-cc)
         (k-cc
-         (lambda (f k ps)
-           (f (lambda (val cont ps^) (cont (k val ps) ps^))
-              k
-              ps))
-         ps-cc))]
+         (lambda (f k)
+           (f (lambda (val cont) (cont (k val)))
+              k))))]
     [`(reset ,expr)
      ; stole rules from https://www.deinprogramm.de/sperber/papers/shift-reset-direct.pdf
      ; I had reset right, but shift was a little off.
      (define k (gensym 'k-reset))
-     (define ps (gensym 'ps-reset))
      (define expr^ (cps-transform expr))
-     `(lambda (,k ,ps)
-        (let-values ([(v ps^)
-                      (,expr^ values ,ps)])
-          (,k v ps^)))]
+     `(lambda (,k)
+        (,k (,expr^ identity)))]
     [`(shift ,user-k ,expr)
      (define k (gensym 'k-shift))
-     (define ps (gensym 'ps-shift))
      (define expr^ (cps-transform expr))
      ; k is the continuation of the shift expression.
      ; user-k is the identifier in the source program which we bind to the delimited current continuation.
@@ -91,82 +83,59 @@
      ; We call cont on (,k val) so calling user-k doesn't escape the shift.
      ; We give apply expr^ to identity so the final result of the shift escapes out to the reset.
      ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
-     `(lambda (,k ,ps) ((let ([,user-k (lambda (val cont ps^)
-                                         (cont (,k val ,ps) ps^))])
-                          ,expr^)
-                        values
-                        ,ps))]
+     `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) identity))]
+    [`(dynamic-wind ,pre-thunk-expr ,value-thunk-expr ,post-thunk-expr)
+
+     'todo]
     ['void
      ; if they define a variable called void, this will break
-     '(lambda (k-void ps-void) (k-void (lambda args (match args [(list args ... k ps) (k (void) ps)]))
-                                       ps-void))]
+     '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
-     (define ps (gensym 'ps-set!))
-     `(lambda (,k ,ps) ,(with-binding ps `(,k (set! ,x ,(bind expr)) (current-ps))))]
+     `(lambda (,k) ,(with-binding `(,k (set! ,x ,(bind expr)))))]
     ['add1
-     `(lambda (k-add1 ps-add1) (k-add1 (lambda (n cont ps) (cont (add1 n) ps)) ps-add1))]
+     `(lambda (k-add1) (k-add1 (lambda (n cont) (cont (add1 n)))))]
     ['list
-     '(lambda (k-list ps-list) (k-list (lambda args (match args [(list args ... k ps) (k args ps)])) ps-list))]
+     '(lambda (k-list) (k-list (lambda args ((last args) (all-but-last args)))))]
     ['vector
-     '(lambda (k-vector ps-vector) (k-vector (lambda args (match args [(list args ... k ps) (k (list->vector args) ps)])) ps-vector))]
+     '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
     [`(if ,cnd ,thn ,els)
      (define k (gensym 'k-if))
-     (define ps (gensym 'ps-if))
      (define thn^ (cps-transform thn))
      (define els^ (cps-transform els))
-     `(lambda (,k ,ps)
-        ,(with-binding ps
+     `(lambda (,k)
+        ,(with-binding
            `(if ,(bind cnd)
-                (,thn^ ,k ,(current-ps))
-                (,els^ ,k ,(current-ps)))))]
+                (,thn^ ,k)
+                (,els^ ,k))))]
     [`(lambda ,args ,body)
      (define k (gensym 'k-lam))
-     (define ps (gensym 'ps-lam))
-     (define ps^ (gensym 'ps^-lam))
      (define cont (gensym 'cont))
      (define body^ (cps-transform body))
-     `(lambda (,k ,ps) (,k (lambda (,@args ,cont ,ps^) (,body^ ,cont ,ps^)) ,ps))]
+     `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
     [`(,f ,xs ...)
-     ; TODO ps
      (define k (gensym 'k-app))
-     (define ps (gensym 'ps-app))
-     `(lambda (,k ,ps) ,(with-binding ps (append (map bind (cons f xs)) (list k (current-ps)))))]
+     `(lambda (,k) ,(with-binding (append (map bind (cons f xs)) (list k))))]
     [_
      (define k (gensym 'k-const))
-     (define ps (gensym 'ps-const))
-     `(lambda (,k ,ps) (,k ,expr ,ps))]))
-
-(define current-ps (make-parameter #f))
-
-; left off here about to make a macro to take in ps and parameterize around with-binding.
-; then bind will thread it and parameterize and the caller can just get the parameter
-
-(define-syntax-rule (with-binding ps body ...) (with-binding^ (parameterize ([current-ps ps]) body ...)))
+     `(lambda (,k) (,k ,expr))]))
 
 ; transforms and binds the expressions according to cps.
 ; bind adds a binding around the inner result and returns the variable it gets bound to.
-; also takes care of ps using current-ps
 ; Ex:
-; TODO add ps to example
 #;(with-binding (f (bind e1) (bind e2)))
 ;~>
 #;`(,e1^
-    (lambda (v1 ps1)
+    (lambda (v1)
       (,e2^
-       (lambda (v2 ps2)
-         ,(f 'v1 'v2)) ; with ps2 as current-ps
-       ps1))
-    ps)
-(define-algebraic-effect with-binding^
+       (lambda (v2)
+         ,(f 'v1 'v2)))))
+(define-algebraic-effect with-binding
   ; that's right, we're compiling continuations with continuations!!!
-  ; and we're compiling parameters with parameters!
   [(bind expr k)
    (define v (gensym 'v-bind))
-   (define ps (current-ps))
-   (define ps^ (gensym 'ps^-bind))
    (define expr^ (cps-transform expr))
-   `(,expr^ (lambda (,v ,ps^) ,(parameterize ([current-ps ps^]) (k v))) ,ps)])
+   `(,expr^ (lambda (,v) ,(k v)))])
 
 ; TODO lift primitives like +
 ; TODO lift higher order stuff like map such that you can do call/cc during map.
@@ -459,5 +428,9 @@ under the current system.
 call/cc will end up working fine (k will "save" the parameterization), but not shift and probably not call-with-composable-continuation either.
 
 read this https://citeseerx.ist.psu.edu/doc/10.1.1.22.7256
+
+doesn't talk about implementation
+
+screw this, i'm doing marks and seeing what happens
 
 |#
