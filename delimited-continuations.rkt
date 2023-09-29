@@ -18,7 +18,7 @@
 
 ; expr -> value
 (define (eval/cps expr)
-  ((eval (cps-transform (desugar expr)) ns) identity))
+  ((eval (cps-transform (desugar expr)) ns) empty-continuation))
 
 ; desugar into core language
 ; expr -> core-expr
@@ -71,7 +71,7 @@
      (define k (gensym 'k-reset))
      (define expr^ (cps-transform expr))
      `(lambda (,k)
-        (,k (,expr^ identity)))]
+        (,k (,expr^ (wrap-continuation ,k (lambda (x) x)))))]
     [`(shift ,user-k ,expr)
      (define k (gensym 'k-shift))
      (define expr^ (cps-transform expr))
@@ -83,7 +83,7 @@
      ; We call cont on (,k val) so calling user-k doesn't escape the shift.
      ; We give apply expr^ to identity so the final result of the shift escapes out to the reset.
      ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
-     `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) identity))]
+     `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) (wrap-continuation ,k (lambda (x) x))))]
     [`(dynamic-wind ,pre-thunk-expr ,value-thunk-expr ,post-thunk-expr)
 
      'todo]
@@ -92,7 +92,7 @@
      '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
-     `(lambda (,k) ,(with-binding `(,k (set! ,x ,(bind expr)))))]
+     `(lambda (,k) ,(with-binding k `(,k (set! ,x ,(bind expr)))))]
     ['add1
      `(lambda (k-add1) (k-add1 (lambda (n cont) (cont (add1 n)))))]
     ['list
@@ -105,6 +105,7 @@
      (define els^ (cps-transform els))
      `(lambda (,k)
         ,(with-binding
+           k
            `(if ,(bind cnd)
                 (,thn^ ,k)
                 (,els^ ,k))))]
@@ -115,10 +116,14 @@
      `(lambda (,k) (,k (lambda (,@args ,cont) (,body^ ,cont))))]
     [`(,f ,xs ...)
      (define k (gensym 'k-app))
-     `(lambda (,k) ,(with-binding (append (map bind (cons f xs)) (list k))))]
+     `(lambda (,k) ,(with-binding k (append (map bind (cons f xs)) (list k))))]
     [_
      (define k (gensym 'k-const))
      `(lambda (,k) (,k ,expr))]))
+
+; the name of the current continuation (just a symbol, i'm not cheating!)
+(define current-k (make-parameter #f))
+(define-syntax-rule (with-binding k body ...) (with-binding^ (parameterize ([current-k k]) (with-binding^ body ...))))
 
 ; transforms and binds the expressions according to cps.
 ; bind adds a binding around the inner result and returns the variable it gets bound to.
@@ -130,12 +135,12 @@
       (,e2^
        (lambda (v2)
          ,(f 'v1 'v2)))))
-(define-algebraic-effect with-binding
+(define-algebraic-effect with-binding^
   ; that's right, we're compiling continuations with continuations!!!
   [(bind expr k)
    (define v (gensym 'v-bind))
    (define expr^ (cps-transform expr))
-   `(,expr^ (lambda (,v) ,(k v)))])
+   `(,expr^ (wrap-continuation ,(current-k) (lambda (,v) ,(k v))))])
 
 ; TODO lift primitives like +
 ; TODO lift higher order stuff like map such that you can do call/cc during map.
@@ -149,6 +154,8 @@
 ; marks is a hasheq from any/c to any/c
 
 ; parameters are implemented by mapping themselves to a box of their current value in the marks.
+
+(define empty-continuation (continuation identity (hasheq)))
 
 (define (continuation-get-mark cont key)
   (hash-ref (continuation-marks cont) key (lambda () (error 'continuation-get-mark "mark not found for key ~a" key))))
@@ -164,6 +171,9 @@
 
 (define (continuation-set-parameter! cont key val)
   (set-box! (continuation-get-mark cont key) val))
+
+(define (wrap-continuation cont proc)
+  (struct-copy continuation cont [proc proc]))
 
 (module+ test
   (define-syntax-rule
