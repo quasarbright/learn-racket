@@ -85,23 +85,19 @@
      ; The actual continuation of the shift expression is only used by user-k. We don't use it to continue. We use identity instead.
      `(lambda (,k) ((let ([,user-k (lambda (val cont) (cont (,k val)))]) ,expr^) (wrap-continuation ,k (lambda (x) x))))]
     [`(dynamic-wind ,pre-thunk-expr ,value-thunk-expr ,post-thunk-expr)
-
      'todo]
-    ['void
-     ; if they define a variable called void, this will break
-     '(lambda (k-void) (k-void (lambda args ((last args) (void)))))]
+    [(or 'void 'add1 'list 'vector 'displayln '+)
+     ; simple builtin functions that don't take in functions
+     `(lambda (k-builtin) (k-builtin (lambda args (match args [(list args ... cont) (cont (apply ,expr args))]))))]
+    [`(quote ,datum)
+     `(lambda (k-quote) (k-quote (quote ,datum)))]
     [`(set! ,x ,expr)
      (define k (gensym 'k-set!))
      `(lambda (,k) ,(with-binding k `(,k (set! ,x ,(bind expr)))))]
-    ['add1
-     `(lambda (k-add1) (k-add1 (lambda (n cont) (cont (add1 n)))))]
-    ['list
-     '(lambda (k-list) (k-list (lambda args ((last args) (all-but-last args)))))]
-    ['vector
-     '(lambda (k-vector) (k-vector (lambda args ((last args) (list->vector (all-but-last args))))))]
     ['make-parameter
      '(lambda (k-make-parameter)
         (k-make-parameter (lambda (v-default k)
+                            ; we don't even use v-default
                             (define p
                               (case-lambda
                                 [(cont) (cont (continuation-get-parameter cont p))]
@@ -111,7 +107,7 @@
                             (k p))))]
     [`(parameterize ([,e-p ,e-new]) ,e)
      (define k (gensym 'k-parameterize))
-     `(lambda (,k) ,(with-binding k `(,(cps-transform e-new)
+     `(lambda (,k) ,(with-binding k `(,(cps-transform e)
                                       (continuation-set-parameter ,k
                                                                   ,(bind e-p)
                                                                   ,(bind e-new)))))]
@@ -226,20 +222,47 @@
   (teval (reset (list (shift k (vector (k 1) (k 2))))))
   (teval (let ([k (reset (shift k k))]) (add1 (k 1))))
   (teval (let ([k (reset (list (shift k k) 1))]) (vector (k 2) (k 3))))
-  (teval (let ([p (make-parameter 0)])
+  ; default value doesn't work
+  #;(teval (let ([p (make-parameter 0)])
            (p)))
   (teval (let ([p (make-parameter 0)])
            (parameterize ([p 1]) (p))))
-  ; it's not setting saved-k
+  (teval (let ([saved-k #f])
+           (if (call/cc (lambda (k) (set! saved-k k) #f))
+               1
+               (saved-k #t))))
   (teval (let ([saved-k #f]
-                 [p (make-parameter 0)]
-                 [v #f])
-             (parameterize ([p 1])
-               (if (call/cc (lambda (k) (set! saved-k k) #f))
-                   (set! v (p))
-                   (void)))
-             (if v (void) (saved-k #t))
-             v))
+               [v #f])
+           (if (call/cc (lambda (k) (set! saved-k k) #f))
+               (set! v 1)
+               (void))
+           (if v (void) (saved-k #t))
+           v))
+  (teval (let ([saved-k #f]
+               [p (make-parameter 0)]
+               [v #f])
+           (parameterize ([p 1])
+             (if (call/cc (lambda (k) (set! saved-k k) #f))
+                 (set! v (p))
+                 (void)))
+           (if v (void) (saved-k #t))
+           v))
+  (teval (let ([saved-k #f]
+               [p (make-parameter 0)]
+               [v #f])
+           (parameterize ([p 1])
+             (if (call/cc (lambda (k) (set! saved-k k) #f))
+                 (set! v (p))
+                 (void)))
+           ; it should ignore this parameterize
+           (if v (void) (parameterize ([p 3]) (saved-k #t)))
+           v))
+  ; composable continuations can be used in a parameterize
+  (teval (let ([p (make-parameter 0)])
+           (parameterize ([p 0])
+             ; (p) should be 1
+             (reset (list (shift k (parameterize ([p 1]) (k 2)))
+                          (p))))))
   (displayln "got to the end"))
 
 #|
@@ -488,4 +511,73 @@ is translation-based CPS not capable of expressing this easily? Do I need to mak
 if you do, rewatch that video. it has nice pictures for the semantics. an interpreter wouldn't even be that bad, but try to figure out translation
 
 is there some way for continuations to take in marks to run under and not break everything? like an optional argument for cases like this?
+
+continuation procedures optionally take in markings.
+when a continuation receives markings, it should merge them into its own markings before proceeding.
+wrap-continuation optionally takes in markings. (listof (or/c #f markings?))
+when wrap-continuation receives markings, it merges the marks into k's.
+
+
+
+going to start writing rewrites in sexprs so they're easier to edit
 |#
+
+#;
+(
+[x] = (lambda (k) (k x))
+
+[(lambda (x) e)] = (lambda (k) (k (lambda (x cont) ([e] cont))))
+
+[(e1 e2)] = (lambda (k)
+              ([e1]
+               (wrap-continuation k (list)
+                                  (lambda (f [ms^ #f])
+                                    ([e2]
+                                     (wrap-continuation k (list ms^)
+                                                        (lambda (x [ms^^ #f])
+                                                          (f x (continuation-add-marks k (list ms^ ms^^))))))))))
+
+[make-parameter] = (lambda (k)
+                     (k (lambda (v-default k^)
+                          (letrec ([p (case-lambda [(cont) (cont (continuation-get-mark cont p))]
+                                                   [(v-new cont) (continuation-set-mark! cont p v-new) (cont (void))])])
+                            ((continuation-set-mark k^ p v-default) p)))))
+
+[(parameterize ([p e-new]) e)] = (lambda (k)
+                                   ([p]
+                                    (wrap-continuation k (list)
+                                                       (lambda (vp ms^)
+                                                         ([e-new]
+                                                          (wrap-continuation k (list ms^)
+                                                                             (lambda (v-new ms^^)
+                                                                               ([e] (continuation-set-mark (continuation-add-marks k (list ms^ ms^^)) p v-new)))))))))
+; TODO desugar parameterize to a runtime function so you don't have to inline the application rewrite for p and e-new
+; TODO test shift insite of p or e-new that parameterizes and continues
+
+[parameterize-rt] = (lambda (k) (k )); left off here
+
+[call/cc] = (lambda (k-cc)
+              (k-cc (lambda (f k)
+                      (f (lambda (val cont)
+                           (k val))
+                         k))))
+
+[call-with-composable-continuation] = (lambda (k-cc)
+                                        (k-cc (lambda (f k)
+                                                (f (lambda (val cont)
+                                                     ; use the marks from the call site of k
+                                                     (cont (k val (continuation-marks cont))))
+                                                   k))))
+
+[(reset e)] = (lambda (k-reset)
+                (k-reset ([e]
+                          (wrap-continuation k-reset (list)
+                                             (lambda (x [ms #f]) x)))))
+
+[(shift user-k e)] = (lambda (k)
+                       ((let ([user-k (lambda (val cont)
+                                        ; use the marks from the call site of k
+                                        (cont (k val (continuation-marks cont))))])
+                          [e])
+                        (wrap-continuation k (list) (lambda (x [ms #f] x)))))
+ )
