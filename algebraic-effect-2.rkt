@@ -210,7 +210,7 @@
   (syntax-parser
     [(_ name:id
         (~optional (~seq #:body-wrapper body-wrapper) #:defaults ([body-wrapper #'(lambda (thnk) (thnk))]))
-        [(effect-name:id v:id k:id)
+        [(effect-name:id v:id ... k:id)
          body ...]
         ...)
      (define/syntax-parse tag (format-id #'name "~a-tag" (syntax-e #'name)))
@@ -220,12 +220,11 @@
          (define (proc thnk) (with-effect-handler handler #:tag tag (body-wrapper thnk)))
          (define (handler v^ k^)
            (match v^
-             [`(effect-name ,v) (let ([k k^]) body ...)]
+             [`(effect-name ,v ...) (let ([k k^]) body ...)]
              ...))
-         (define (effect-name v^) (perform `(effect-name ,v^) #:tag tag))
+         (define (effect-name v ...) (perform `(effect-name ,@(list v ...)) #:tag tag))
          ...)]))
 
-; TODO zero and multi-argument effects
 ; TODO allow custom macro for name
 ; TODO better error message when no prompt available
 
@@ -241,4 +240,11 @@
       #:body-wrapper (lambda (thnk) (thnk) empty-stream)
       [(yield v k) (stream-cons v (k (void)))])
     (check-equal? (stream->list (generator (yield 1) (yield 2)))
-                  '(1 2))))
+                  '(1 2)))
+  (let ()
+    (define-algebraic-effect math
+      [(zero k) (k 0)]
+      [(add a b k) (k (+ a b))]
+      [(mult a b k) (k (* a b))])
+    (check-equal? (math (list (zero) (add 1 2) (mult 3 4)))
+                  '(0 3 12))))
