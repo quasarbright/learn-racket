@@ -222,11 +222,11 @@
            (match v^
              [`(effect-name ,v ...) (let ([k k^]) body ...)]
              ...))
-         (define (effect-name v ...) (perform `(effect-name ,@(list v ...)) #:tag tag))
+         (define (effect-name v ...)
+           (unless (continuation-prompt-available? tag)
+             (error 'effect-name "cannot use outside of a '~a' form" 'name))
+           (perform `(effect-name ,@(list v ...)) #:tag tag))
          ...)]))
-
-; TODO allow custom macro for name
-; TODO better error message when no prompt available
 
 (module+ test
   (let ()
@@ -247,4 +247,8 @@
       [(add a b k) (k (+ a b))]
       [(mult a b k) (k (* a b))])
     (check-equal? (math (list (zero) (add 1 2) (mult 3 4)))
-                  '(0 3 12))))
+                  '(0 3 12)))
+  (let ()
+    (define-algebraic-effect math
+      [(zero k) (k 0)])
+    (check-exn #rx"cannot use outside" (lambda () (zero)))))
