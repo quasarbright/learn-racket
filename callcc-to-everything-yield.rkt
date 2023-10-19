@@ -142,6 +142,33 @@
   ; because we just jumped back in the body. this just keeps repeating until
   ; we finally return naturally.
 
+  ; from this, it is pretty clear how the shift abort causes the after thunk
+  ; to be invoked. and if you don't think about it too much, it makes sense
+  ; that the before thunk gets invoked when we re-enter from a yield. but
+  ; how does a continuation know to run the before and after thunk
+  ; for its dynamic context, but not act like we're exiting the caller's
+  ; dynamic extent? the answer is subtle.
+  ;
+  ; we're yielding from here when we re-yield.
+  ; this gives the outer handler a continuation
+  ; that will fill in the hole of the reenter yield.
+  ; In other words, the continuation that the user sees captures this
+  ; dynamic-wind! When the continuation is called by the user, it fills
+  ; in the hole of the reenter yield, which ends up running the before and after thunks!
+  ;
+  ; we don't have to wrap the continuations like with other implementations.
+  ; Instead of making a dynamic wind that doesn't know about continuations and then making
+  ; a wrapped call/cc that plays nice with it, we make a dynamic wind that _uses_ continuations!
+  ;
+  ; As for why we don't leave the dynamic extent of the caller:
+  ; at this point, the continuation is basically just a normal function.
+  ; the only time we jump out of a dynamic extent is via shift (yield).
+  ; so the continuation re-enters its dynamic extent because it contains
+  ; the dynamic-wind. and the caller thinks its just a function, so it doesn't
+  ; exit its dynamic extent.
+  ; the call/cc in terms of shift gets its jumping behavior by wrapping
+  ; the continuation with a function that does an extra shift.
+
   ; yield is perfect for dynamic wind because we can "catch the jump" and execute
   ; the after thunk. and we can do the opposite on the way back in. yield makes it easy
   ; for a middle-man, dynamic-wind, to do stuff every time
@@ -179,7 +206,9 @@
 (define call/cc
   (lambda (p)
     (shift k (k (p (lambda (x)
-                          (shift k1 (k x))))))))
+                     ; I think this shift is why we leave
+                     ; the dynamic extent of the caller and jump.
+                     (shift k1 (k x))))))))
 
 (define-syntax-rule (let/cc k body ...) (call/cc (lambda (k) body ...)))
 
@@ -375,5 +404,37 @@
                   (lambda () (displayln "in user" out))
                   (lambda () (list (saved-k 0) (saved-k 1)))
                   (lambda () (displayln "out user" out))))
-              (string-split (get-output-string out) "\n")))))
+              (string-split (get-output-string out) "\n"))))
+  ; produces 0s and 1s. the parameterize around the saved-k does nothing
+  ; the one in the reset overrides it.
+  (teval '(let ([p (make-parameter 0)]
+                [saved-k #f])
+            (list (reset (parameterize ([p 1])
+                           (shift k (set! saved-k k) (list (p)))
+                           (p)))
+                  (p)
+                  (parameterize ([p 2]) (saved-k (void)))
+                  (parameterize ([p 3]) (saved-k (void)))
+                  (saved-k (void)))))
+  ; the parameterize around the saved-k works.
+  (teval '(let ([p (make-parameter 0)]
+                [saved-k #f])
+            (list (reset (shift k (set! saved-k k) (list (p)))
+                         (p))
+                  (p)
+                  (parameterize ([p 2]) (saved-k (void)))
+                  (parameterize ([p 3]) (saved-k (void)))
+                  (saved-k (void)))))
+  ; the parameterize around the saved-k works.
+  ; we only get the 9 from the (list (p)) in the shift interestingly.
+  ; i never thought about this behavior but the implementation passes!
+  (teval '(let ([p (make-parameter 0)]
+                [saved-k #f])
+            (list (parameterize ([p 9])
+                    (reset (shift k (set! saved-k k) (list (p)))
+                           (p)))
+                  (p)
+                  (parameterize ([p 2]) (saved-k (void)))
+                  (parameterize ([p 3]) (saved-k (void)))
+                  (saved-k (void))))))
 ; TODO test parameterize, mutate, jump out, jump back in, and make sure you get mutated value
