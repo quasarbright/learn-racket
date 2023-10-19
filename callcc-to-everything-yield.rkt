@@ -1,6 +1,7 @@
 #lang racket
 
 ; NOTE: this actually works!
+; actually, call/cc and call-with-current-continuation have slight bugs.
 
 ; you can get delimited continuations, composable continuations, dynamic
 ; wind, and parameters from just call/cc
@@ -436,5 +437,24 @@
                   (p)
                   (parameterize ([p 2]) (saved-k (void)))
                   (parameterize ([p 3]) (saved-k (void)))
-                  (saved-k (void))))))
+                  (saved-k (void)))))
+  (test-case "call/cc doesn't leave the dynamic extent"
+    (teval '(let ([out (open-output-string)])
+              (let ([saved-k #f])
+                (reset
+                 (dynamic-wind
+                   (lambda () (displayln "in" out))
+                   (lambda () (add1 (call/cc (lambda (k) 1))))
+                   (lambda () (displayln "out" out)))))
+              (string-split (get-output-string out) "\n"))))
+  (test-case "call-with-comosable-continuation doesn't leave the dynamic extent"
+    (teval '(let ([out (open-output-string)])
+              (let ([saved-k #f])
+                (reset
+                 (dynamic-wind
+                   (lambda () (displayln "in" out))
+                   (lambda () (add1 (call-with-composable-continuation
+                                     (lambda (k) 1))))
+                   (lambda () (displayln "out" out)))))
+              (string-split (get-output-string out) "\n")))))
 ; TODO test parameterize, mutate, jump out, jump back in, and make sure you get mutated value
