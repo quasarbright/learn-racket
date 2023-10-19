@@ -1,23 +1,27 @@
 #lang racket
 
+; NOTE: this actually works!
+
 ; you can get delimited continuations, composable continuations, dynamic
 ; wind, and parameters from just call/cc
 
-; dynamic-wind + call/cc by tracking winders is not too complicated,
-; but trying to add support for delimited continuations is really hard.
-; if you start with reset + shift, dynamic wind is easy. you can make
-; wrapped reset + shift that plays nice, and then implementing call/cc in
-; terms of the wrapped shift gives you call/cc that plays nice too.
+; starting with call/cc, you can implement dynamic-wind by keeping track of "winders" and
+; making a wrapped call/cc that plays nice with it. This is a little complicated and brittle,
+; and trying to add support for delimited continuations is really hard. I couldn't figure it out.
+; however, if you start with reset + shift, you can easily get dynamic wind in terms of something like
+; algebraic effects. Then, you can make wrapped reset + shift that plays nice with it,
+; and then implementing call/cc in terms of the wrapped shift gives you call/cc that plays nice too.
+; The only caveat is that everything has to be in a reset or things break.
 
-; here is the plan:
+; here is the outline:
 ; - start out with real racket call/cc
 ; - get reset1 + shift1 in terms of racket:call/cc
-; - get yield in terms of reset1 and shift1
-; - make dynamic wind in terms of yield.
-; - make reset2 and shift2 that play nice with dynamic wind using yield.
-; - make call/cc2 in terms of shift
-; - the 2 things are the final versions.
-; - define parameters in terms of dynamic wind.
+; - get yield in terms of reset1 and shift1 (algebraic effects)
+; - make dynamic wind in terms of yield
+; - make user-accessible reset and shift that play nice with dynamic wind,
+; essentially a handler and an effect respectively
+; - make user-accessible call/cc in terms of shift
+; - define parameters in terms of dynamic wind
 
 ; this is mostly a bunch of things pieced together from oleg kiselyov's blog
 ; https://okmij.org/ftp/continuations/implementations.html
@@ -76,7 +80,7 @@
      (go th)))); does not return
 
 (define (shift* f)
-  (call-with-composable-continuation
+  (call-with-composable-continuation1
    (lambda (k); stack fragment
      (go
       (lambda ()
@@ -85,7 +89,7 @@
         (f k))))))
 
 ; I wrote this, inspired by oleg's shift* implementation.
-(define (call-with-composable-continuation f)
+(define (call-with-composable-continuation1 f)
   ; If you call this lambda in f, you'll do k, but when the body of the reset is done, instead of returning to
   ; the reset's continuation, it'll return HERE to k1 and fill in the hole in the shift with the value of finishing
   ; the reset! And then the next thing on the stack is the reset's continuation, so when the shift body finishes,
@@ -179,6 +183,10 @@
 
 (define-syntax-rule (let/cc k body ...) (call/cc (lambda (k) body ...)))
 
+; TODO test
+(define (call-with-composable-continuation f)
+  (shift k (k (f k))))
+
 
 ;; --- parameters from dynamic wind ---
 
@@ -207,15 +215,18 @@
 (module+ test
   ; these tests are captured in the continuations lol.
   ; i'll fix that if it becomes a problem, idk if i can just
-  ; install barriers. seems to be fine though.
+  ; install barriers bc of go. seems to be fine though.
 
   (define-namespace-anchor anc)
   (define ns (namespace-anchor->namespace anc))
 
+  ; evaluates using my control forms
   (define (eval/cc expr) (eval expr ns))
+  ; evaluates using the real racket control forms
   (define (eval/racket expr) (eval expr (parameterize ([current-namespace (module->namespace 'racket)])
                                           (namespace-require 'racket/control)
                                           (current-namespace))))
+  ; test that my control forms have the same behavior as the real racket control forms for expr
   (define-check (teval expr)
     (check-equal? (eval/cc expr) (eval/racket expr)))
 
