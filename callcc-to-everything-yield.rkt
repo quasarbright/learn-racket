@@ -1,7 +1,6 @@
 #lang racket
 
-; NOTE: this actually works!
-; actually, call/cc and call-with-current-continuation have slight bugs.
+; NOTE: this is the one that actually works!
 
 ; you can get delimited continuations, composable continuations, dynamic
 ; wind, and parameters from just call/cc
@@ -127,7 +126,14 @@
 ; so much simpler than the call/cc winders list approach.
 
 (struct yield-record [v k] #:transparent)
+(struct yield-record/passthrough yield-record [] #:transparent)
 (define (yield v) (shift1 k (yield-record v k)))
+; only use this when you're going to immediately resume.
+; the yield doesn't exit the dynamic extent, and the continuation doesn't
+; re-enter it the first time it's used. but after that,
+; the continuation has the regular behavior wrt dynamic extent.
+; this is used to implement non-aborting operators like call/cc.
+(define (yield/passthrough v) (shift1 k (yield-record/passthrough v k)))
 
 (define (dynamic-wind before-thunk thunk after-thunk)
   ; all user-accessible control operators go through yield.
@@ -178,10 +184,15 @@
   ; in this sense, dynamic wind is essentially an effect handler that just defers
   ; handling.
   ; the actual handler in most cases is user-reset* which handles shift effects.
+  (define skip? #f)
   (let loop ((th (lambda () (reset1 (thunk)))))
-    (before-thunk)
+    (if skip?
+        (set! skip? #f)
+        (before-thunk))
     (let ((res (th)))
-      (after-thunk)
+      (when (yield-record/passthrough? res)
+        (set! skip? #t))
+      (unless skip? (after-thunk))
       (match res
         [(yield-record v k)
          (let ((reenter (yield v)))
@@ -204,18 +215,21 @@
   ; perform a shift effect
   (yield (shift-record f)))
 
+(define-syntax-rule (shift/passthrough k body ...) (shift/passthrough* (lambda (k) body ...)))
+(define (shift/passthrough* f)
+  (yield/passthrough (shift-record f)))
+
 (define call/cc
   (lambda (p)
-    (shift k (k (p (lambda (x)
+    (shift/passthrough k (k (p (lambda (x)
                      ; I think this shift is why we leave
                      ; the dynamic extent of the caller and jump.
                      (shift k1 (k x))))))))
-
 (define-syntax-rule (let/cc k body ...) (call/cc (lambda (k) body ...)))
 
 ; TODO test
 (define (call-with-composable-continuation f)
-  (shift k (k (f k))))
+  (shift/passthrough k (k (f k))))
 
 
 ;; --- parameters from dynamic wind ---
