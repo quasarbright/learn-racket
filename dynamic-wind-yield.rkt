@@ -3,6 +3,7 @@
 (require racket/control)
 
 ; dynamic wind in terms of yield from oleg
+; this isn't quite right. see the callcc to everything via yield
 
 (struct yield-record [v k] #:transparent)
 ; just a case analysis on a pure value, no control stuff
