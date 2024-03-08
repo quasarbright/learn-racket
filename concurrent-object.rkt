@@ -4,6 +4,7 @@
  ; a class with concurrent methods that can be called
  ; concurrently, but the calls are processed serially.
  ; concurrent method calls are blocking.
+ ; concurrent methods run in a separate thread from the caller.
  concurrent-object%
  ; defines a concurrent method in a class. concurrent methods are executed serially even
  ; if called concurrently, and block until completion.
