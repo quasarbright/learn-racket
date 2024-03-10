@@ -56,18 +56,23 @@
    corner-tiles))
 
 (define CHUNK_WIDTH 80)
-(define CHUNK_HEIGHT 15)
+(define CHUNK_HEIGHT 2)
 
 ; -> CollapsedChunk
 ; randomly generate a grid of tiles that are properly connected
 (define (make-collapsed-chunk)
   (define chunk (make-initial-chunk))
+  (chunk-fully-collapse! chunk)
+  (chunk-get-collapsed chunk))
+
+; Chunk -> Void
+; collapse all waves in the chunk
+(define (chunk-fully-collapse! chunk)
   (let loop ()
     (define idx-to-collapse (chunk-find-idx-to-collapse chunk))
     (when idx-to-collapse
       (chunk-collapse! chunk idx-to-collapse)
-      (loop)))
-  (chunk-get-collapsed chunk))
+      (loop))))
 
 ; -> Chunk
 ; Initial uncollapsed chunk
@@ -102,9 +107,18 @@
       (loop))))
 
 ; Chunk Index -> Void
-; Collapses the specified wave to just one item, chosen uniformly randomly
+; Collapses the specified wave to just one item, chosen uniformly randomly from valid tiles.
 (define (chunk-collapse-wave! chunk idx)
-  (chunk-set! chunk idx (list (random-ref (chunk-get chunk idx)))))
+  ; before collapsing, filter the wave based on neighbors.
+  ; this is only necessary in the presence of walking where fresh waves are naively added.
+  (define neighbors (get-idx-neighbors idx))
+  (define wave
+    (for/fold ([wave (chunk-get chunk idx)])
+              ([(direction-to-neighbor neighbor-idx) (in-hash neighbors)])
+      (define neighbor-wave (chunk-get chunk neighbor-idx))
+      ; TODO this is awkward because constrain-wave is neighbor-focused
+      (constrain-wave neighbor-wave wave (direction-opposite direction-to-neighbor))))
+  (chunk-set! chunk idx (list (random-ref wave))))
 
 ; Chunk Index -> Wave
 (define (chunk-get chunk idx)
@@ -208,7 +222,8 @@
      [(== dashv-tile) "┤"]
      [(== vdash-tile) "├"])))
 
-(module+ main
+
+#;(module+ main
   (display-collapsed-chunk (make-collapsed-chunk)))
 
 #|
@@ -235,3 +250,57 @@ create a new column on the right, and add some padding so it's not obvious.
 
 screw chunking and things being the same when you come back, just do infinite scroll
 |#
+
+; infinite treadmill, no chunking
+
+; CollapsedChunk Direction -> CollapsedChunk
+; "walk" in the direction, deleting the tiles behind and generating new tiles in front
+(define (collapsed-chunk-walk collapsed-chunk direction)
+  (define chunk (uncollapse-chunk collapsed-chunk))
+  (chunk-walk! chunk direction)
+  (chunk-fully-collapse! chunk)
+  (chunk-get-collapsed chunk))
+
+; CollapsedChunk -> Chunk
+; creates a chunk that just has collapsed wave for each tile
+(define (uncollapse-chunk collapsed-chunk)
+  (for/vector ([row collapsed-chunk])
+    (for/vector ([tile row])
+      (list tile))))
+
+; Chunk Direction -> Void
+; "walk" in the direction, deleting the tiles behind and generating new tiles in front
+(define (chunk-walk! chunk direction)
+  (match direction
+    [(== DOWN) (chunk-walk-down! chunk)]))
+
+; Chunk -> Void
+(define (chunk-walk-down! chunk)
+  (for ([row-num (in-range (sub1 CHUNK_HEIGHT))])
+    (vector-set! chunk row-num (vector-ref chunk (add1 row-num))))
+  (vector-set! chunk (sub1 CHUNK_HEIGHT) (for/vector ([_ CHUNK_WIDTH]) tiles)))
+
+(define (display-collapsed-chunk-last-row chunk)
+  (for ([tile (vector-ref chunk (sub1 CHUNK_HEIGHT))])
+    (display-tile tile))
+  (newline))
+
+(module+ main
+  (define collapsed-chunk (make-collapsed-chunk))
+  (display-collapsed-chunk collapsed-chunk)
+  (let loop ([collapsed-chunk collapsed-chunk])
+    (define collapsed-chunk^ (collapsed-chunk-walk collapsed-chunk DOWN))
+    (display-collapsed-chunk-last-row collapsed-chunk^)
+    (sleep 0.1)
+    (loop collapsed-chunk^)))
+
+#|
+an idea for chunking that satisfies everything:
+- in seams, randomly generate a boolean in each position for whether the chunks should be connected at that point
+in a repeatable way. use absolute wave position or something based on index and chunk position as the seed
+- when generating a chunk, add those connectivity constraints around it as a border of straight tiles
+- after chunk generation, get rid of the connectivity border
+- initially, you can just do all trues to get the buffering and stuff working
+|#
+
+; proper constant-space repeatable chunking
