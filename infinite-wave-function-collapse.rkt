@@ -65,8 +65,8 @@
    corner-tiles
    single-tiles))
 
-(define CHUNK_WIDTH  30)
-(define CHUNK_HEIGHT 30)
+(define CHUNK_WIDTH  20)
+(define CHUNK_HEIGHT 20)
 
 ; -> CollapsedChunk
 ; randomly generate a grid of tiles that are properly connected
@@ -476,32 +476,45 @@ in a repeatable way. use absolute wave position or something based on index and 
 ; they can also walk into another chunk.
 ; when the player walks near the edge of a chunk, it will show some tiles from this chunk and the next chunk.
 ; the screen should shift one at a time.
-; we only need keep a 3x3 grid of chunks generated.
-; the player is always in the center chunk. when the player walks into a new chunk, we treadmill the chunk grid.
+; we only need keep a 2x2 grid of chunks generated.
+; the player is always in the top-left chunk. when the player walks into a new chunk, we treadmill the chunk grid.
+; We don't need to pre-generate the chunks above or to the left of the player because they will never be partially in view.
+; Since everything is top-left oriented, we will only ever partially see the chunks to the right and below the player when walking
+; through the player chunk.
 
-; a ChunkGrid is a 3x3 2D vector of CollapsedChunks
+; a ChunkGrid is a 2x2 2D vector of CollapsedChunks
+; the player is located in the top-left chunk, which is at (0,0) in the grid
 
 ; a State is a
 (struct state [grid pos idx])
 ; where
 ; grid is a ChunkGrid
 ; pos is the position of the center chunk
-; idx is the index of the player within the center chunk
+; idx is the index of the player within the player chunk
 ; we only store grid to save time re-computing it.
 
 ; Position -> Grid
 (define (generate-grid pos)
   (match pos
     [(position x y)
-     (for/vector ([y (list (sub1 y) y (add1 y))])
-       (for/vector ([x (list (sub1 x) x (add1 x))])
+     (for/vector ([y (list y (add1 y))])
+       (for/vector ([x (list x (add1 x))])
          (generate-collapsed-chunk (position x y))))]))
 
 ; State KeyPress -> State
-(define (handle-key/grid st key)
+(define (handle-key/state st key)
   (match (key->direction key)
     [#f st]
     [dir (state-walk st dir)]))
+
+; KeyPress -> (or/c #f Direction)
+(define (key->direction key)
+  (match key
+       [(or "left" "a") LEFT]
+       [(or "right" "d") RIGHT]
+       [(or "up" "w") UP]
+       [(or "down" "s") DOWN]
+       [_ #f]))
 
 ; State Direction -> State
 ; take a single (tile) step in the direction of dir
@@ -511,19 +524,19 @@ in a repeatable way. use absolute wave position or something based on index and 
      (match dir
        [(== RIGHT)
         (if (= (add1 col) CHUNK_WIDTH)
-            (state (grid-walk grid pos dir) (pos (add1 x) y) (index row 0))
+            (state (grid-walk grid pos dir) (position (add1 x) y) (index row 0))
             (state grid pos (index row (add1 col))))]
        [(== LEFT)
         (if (< (sub1 col) 0)
-            (state (grid-walk grid pos dir) (pos (sub1 x) y) (index row (sub1 CHUNK_WIDTH)))
+            (state (grid-walk grid pos dir) (position (sub1 x) y) (index row (sub1 CHUNK_WIDTH)))
             (state grid pos (index row (sub1 col))))]
        [(== UP)
         (if (< (sub1 row) 0)
-            (state (grid-walk grid pos dir) (pos x (sub1 y)) (index (sub1 CHUNK_HEIGHT) col))
+            (state (grid-walk grid pos dir) (position x (sub1 y)) (index (sub1 CHUNK_HEIGHT) col))
             (state grid pos (index (sub1 row) col)))]
        [(== DOWN)
         (if (= (add1 row) CHUNK_HEIGHT)
-            (state (grid-walk grid pos dir) (pos x (add1 y)) (index 0 col))
+            (state (grid-walk grid pos dir) (position x (add1 y)) (index 0 col))
             (state grid pos (index (add1 row) col)))])]))
 
 ; Grid Position Direction -> Grid
@@ -534,32 +547,52 @@ in a repeatable way. use absolute wave position or something based on index and 
   (match-define (position x y) pos)
   (match dir
     [(== RIGHT)
-     (vector (vector (grid-get grid (index 0 1)) (grid-get grid (index 0 2)) (generate-collapsed-chunk (position (+ x 2) (+ y -1))))
-             (vector (grid-get grid (index 1 1)) (grid-get grid (index 1 2)) (generate-collapsed-chunk (position (+ x 2) (+ y 0))))
-             (vector (grid-get grid (index 2 1)) (grid-get grid (index 2 2)) (generate-collapsed-chunk (position (+ x 2) (+ y 1)))))]
+     (vector (vector (grid-get grid (index 0 1)) (generate-collapsed-chunk (position (+ x 2) (+ y 0))))
+             (vector (grid-get grid (index 1 1)) (generate-collapsed-chunk (position (+ x 2) (+ y 1)))))]
     [(== LEFT)
-     (vector (vector (generate-collapsed-chunk (position (+ x -2) (+ y -1))) (grid-get grid (index 0 0)) (grid-get grid (index 0 1)))
-             (vector (generate-collapsed-chunk (position (+ x -2) (+ y 0))) (grid-get grid (index 1 0)) (grid-get grid (index 1 1)))
-             (vector (generate-collapsed-chunk (position (+ x -2) (+ y 1))) (grid-get grid (index 2 0)) (grid-get grid (index 2 1))))]
+     (vector (vector (generate-collapsed-chunk (position (+ x -1) (+ y 0))) (grid-get grid (index 0 0)))
+             (vector (generate-collapsed-chunk (position (+ x -1) (+ y 1))) (grid-get grid (index 1 0))))]
     [(== UP)
-     (vector (vector (generate-collapsed-chunk (position (+ x -1) (+ y -2))) (generate-collapsed-chunk (position (+ x 0) (+ y -2))) (generate-collapsed-chunk (position (+ x 1) (+ y -2))))
-             (vector (grid-get grid (index 0 0)) (grid-get grid (index 0 1)) (grid-get grid (index 0 2)))
-             (vector (grid-get grid (index 1 0)) (grid-get grid (index 1 1)) (grid-get grid (index 1 2))))]
+     (vector (vector (generate-collapsed-chunk (position (+ x 0) (+ y -1))) (generate-collapsed-chunk (position (+ x 1) (+ y -1))))
+             (vector (grid-get grid (index 0 0)) (grid-get grid (index 0 1))))]
     [(== DOWN)
-     (vector (vector (grid-get grid (index 1 0)) (grid-get grid (index 1 1)) (grid-get grid (index 1 2)))
-             (vector (grid-get grid (index 2 0)) (grid-get grid (index 2 1)) (grid-get grid (index 2 2)))
-             (vector (generate-collapsed-chunk (position (+ x -1) (+ y 2))) (generate-collapsed-chunk (position (+ x 0) (+ y 2))) (generate-collapsed-chunk (position (+ x 1) (+ y 2)))))]))
-
-;;; left off here, just finished grid-walk, need to do drawing, which is just tile sampling.
+     (vector (vector (grid-get grid (index 1 0)) (grid-get grid (index 1 1)))
+             (vector (generate-collapsed-chunk (position (+ x 0) (+ y 2))) (generate-collapsed-chunk (position (+ x 1) (+ y 2)))))]))
 
 ; Grid Index -> CollapsedChunk
 (define grid-get chunk-get)
 
-; KeyPress -> (or/c #f Direction)
-(define (key->direction key)
-  (match key
-       [(or "left" "a") LEFT]
-       [(or "right" "d") RIGHT]
-       [(or "up" "w") UP]
-       [(or "down" "s") DOWN]
-       [_ #f]))
+; State -> Image
+(define (draw-state st)
+  (draw-collapsed-chunk (state-get-visible-collapsed-chunk st)))
+
+; State -> CollapsedChunk
+; get the tiles visible as a collapsed chunk according to the player's index within the player chunk.
+; this is an abuse of the chunk type since this isn't a unit of world generation, but rather a unit of viewing.
+(define (state-get-visible-collapsed-chunk st)
+  (match-define (state grid pos (index row col)) st)
+  (define width (chunk-width (grid-get grid (index 0 0))))
+  (define height (chunk-height (grid-get grid (index 0 0))))
+  (for/vector ([drow (in-range height)])
+    ; treating the whole grid as one chunk, the row of the tile within that chunk
+    (define abs-row (+ row drow))
+    ; grid-row is the row of the chunk of the tile
+    ; chunk-row is the row of the tile in that chunk
+    (define-values (grid-row chunk-row) (quotient/remainder abs-row height))
+    (for/vector ([dcol (in-range width)])
+      ; treating the whole grid as one chunk, the column of the tile within that chunk
+      (define abs-col (+ col dcol))
+      ; grid-col is the column of the chunk of the tile
+      ; chunk-col is the column of the tile in that chunk
+      (define-values (grid-col chunk-col) (quotient/remainder abs-col width))
+      (define chunk (grid-get grid (index grid-row grid-col)))
+      (chunk-get chunk (index chunk-row chunk-col)))))
+
+(module+ main
+  (define pos (position 0 0))
+  (define idx (index 0 0))
+  (define grid (generate-grid pos))
+  (define st (state grid pos idx))
+  (big-bang st
+            [on-key handle-key/state]
+            [to-draw draw-state]))
