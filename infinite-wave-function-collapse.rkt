@@ -7,7 +7,10 @@
 ; 2D tile-based wave-function collapse
 ; neighbors are up, down, left, and right, no diagonal
 
-; single chunk generation
+; by the end, we have chunk-based infinite world generation in constant space,
+; and when you walk away and return to an area, it is the same as before.
+
+;;; single chunk generation
 
 ; a Wave is a (listof Tile)
 ; list of possibilities. implicit uniform probability distribution.
@@ -276,7 +279,7 @@ create a new column on the right, and add some padding so it's not obvious.
 screw chunking and things being the same when you come back, just do infinite scroll
 |#
 
-; infinite treadmill, no chunking
+;;; infinite treadmill, no chunking, walk 1 tile at a time, returning to previous position will have different tiles.
 
 ; CollapsedChunk Direction -> CollapsedChunk
 ; "walk" in the direction, deleting the tiles behind and generating new tiles in front
@@ -328,12 +331,13 @@ in a repeatable way. use absolute wave position or something based on index and 
 - initially, you can just do all trues to get the buffering and stuff working
 |#
 
-; proper constant-space repeatable chunking
+;;; proper constant-space repeatable chunking
+; walk one whole chunk at a time. this step introduces connectivity borders.
 
 ; high level:
 ; we have a grid of chunks infinitely expanding in all (2D) directions.
 ; each chunk is procedurally generated, using its position as a random seed.
-; before generation, each chunk is surrounded by a "connectivity border" of straight and empty tiles (seeded by position),
+; before generation, each chunk is surrounded by a random "connectivity border" of straight and empty tiles (seeded by position),
 ; which ensures that chunks properly connect to each other. After generation, this border is removed.
 ; To seed the connectivity borders, we use half-positions like (position 0.5 0) for the vertial border between
 ; (position 0 0) and (position 1 0). The former's chunk will use that seed for its right border and the latter for its left.
@@ -469,7 +473,9 @@ in a repeatable way. use absolute wave position or something based on index and 
         [_ (display "*")]))
     (newline)))
 
-; walk 1 tile at a time in a chunked world
+;;; walk 1 tile at a time in a chunked world
+; this step introduces a chunk grid so we can be in the middle of a chunk and have a whole chunk-worth of tiles on-screen.
+; that's how we get 1-tile walking from the previous step.
 
 ; high level:
 ; building upon previous step, the "player" is in some chunk and they can walk around inside of it.
@@ -569,6 +575,8 @@ in a repeatable way. use absolute wave position or something based on index and 
 ; State -> CollapsedChunk
 ; get the tiles visible as a collapsed chunk according to the player's index within the player chunk.
 ; this is an abuse of the chunk type since this isn't a unit of world generation, but rather a unit of viewing.
+; the top-left tile will be at idx within the player chunk. if the player is in the middle of the chunk,
+; some tiles from the other chunks will be on-screen.
 (define (state-get-visible-collapsed-chunk st)
   (match-define (state grid pos (index row col)) st)
   (define width (chunk-width (grid-get grid (index 0 0))))
@@ -576,13 +584,13 @@ in a repeatable way. use absolute wave position or something based on index and 
   (for/vector ([drow (in-range height)])
     ; treating the whole grid as one chunk, the row of the tile within that chunk
     (define abs-row (+ row drow))
-    ; grid-row is the row of the chunk of the tile
+    ; grid-row is the row of the chunk of the tile in the grid
     ; chunk-row is the row of the tile in that chunk
     (define-values (grid-row chunk-row) (quotient/remainder abs-row height))
     (for/vector ([dcol (in-range width)])
       ; treating the whole grid as one chunk, the column of the tile within that chunk
       (define abs-col (+ col dcol))
-      ; grid-col is the column of the chunk of the tile
+      ; grid-col is the column of the chunk of the tile in the grid
       ; chunk-col is the column of the tile in that chunk
       (define-values (grid-col chunk-col) (quotient/remainder abs-col width))
       (define chunk (grid-get grid (index grid-row grid-col)))
