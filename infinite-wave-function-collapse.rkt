@@ -1,9 +1,13 @@
 #lang racket
 
-(require racket/random)
+(require racket/random
+         2htdp/universe
+         2htdp/image)
 
 ; 2D tile-based wave-function collapse
 ; neighbors are up, down, left, and right, no diagonal
+
+; single chunk generation
 
 ; a Wave is a (listof Tile)
 ; list of possibilities. implicit uniform probability distribution.
@@ -41,22 +45,28 @@
 (define vdash-tile (set RIGHT UP DOWN))
 (define vertical-tile (set UP DOWN))
 (define horizontal-tile (set LEFT RIGHT))
+(define right-tile (set RIGHT))
+(define left-tile (set LEFT))
+(define up-tile (set UP))
+(define down-tile (set DOWN))
 (define empty-tile (set))
 
 (define straight-tiles (list horizontal-tile vertical-tile))
 (define corner-tiles (list l-tile j-tile r-tile seven-tile))
 (define t-tiles (list t-tile bottom-tile vdash-tile dashv-tile))
+(define single-tiles (list left-tile right-tile up-tile down-tile))
 
 (define tiles
   (append
    (list empty-tile
-         #;plus-tile)
-   ;t-tiles
+         plus-tile)
+   t-tiles
    straight-tiles
-   corner-tiles))
+   corner-tiles
+   single-tiles))
 
-(define CHUNK_WIDTH 80)
-(define CHUNK_HEIGHT 2)
+(define CHUNK_WIDTH  30)
+(define CHUNK_HEIGHT 30)
 
 ; -> CollapsedChunk
 ; randomly generate a grid of tiles that are properly connected
@@ -76,9 +86,9 @@
 
 ; -> Chunk
 ; Initial uncollapsed chunk
-(define (make-initial-chunk)
-  (for/vector ([row (in-range CHUNK_HEIGHT)])
-    (for/vector ([col (in-range CHUNK_WIDTH)])
+(define (make-initial-chunk [width CHUNK_WIDTH] [height CHUNK_HEIGHT])
+  (for/vector ([_ (in-range height)])
+    (for/vector ([_ (in-range width)])
       ; tiles itself is a wave
       tiles)))
 
@@ -93,7 +103,7 @@
   (let loop ()
     (define idx (pop!))
     (define wave (chunk-get chunk idx))
-    (define neighbors (get-idx-neighbors idx))
+    (define neighbors (get-idx-neighbors chunk idx))
     (for ([(direction-to-neighbor neighbor-idx) (in-hash neighbors)])
       (define neighbor-wave (chunk-get chunk neighbor-idx))
       (define neighbor-wave^ (constrain-wave wave neighbor-wave direction-to-neighbor))
@@ -111,13 +121,16 @@
 (define (chunk-collapse-wave! chunk idx)
   ; before collapsing, filter the wave based on neighbors.
   ; this is only necessary in the presence of walking where fresh waves are naively added.
-  (define neighbors (get-idx-neighbors idx))
+  (define neighbors (get-idx-neighbors chunk idx))
   (define wave
     (for/fold ([wave (chunk-get chunk idx)])
               ([(direction-to-neighbor neighbor-idx) (in-hash neighbors)])
       (define neighbor-wave (chunk-get chunk neighbor-idx))
       ; TODO this is awkward because constrain-wave is neighbor-focused
       (constrain-wave neighbor-wave wave (direction-opposite direction-to-neighbor))))
+  (when (null? wave)
+    (debug-display-chunk chunk)
+    (error (format "empty wave found at ~a" idx)))
   (chunk-set! chunk idx (list (random-ref wave))))
 
 ; Chunk Index -> Wave
@@ -134,7 +147,7 @@
 ; Index -> (hash/c Direction Index)
 ; get the neighboring indices in each direction,
 ; only returns those which are in bounds.
-(define (get-idx-neighbors idx)
+(define (get-idx-neighbors chunk idx)
   (match idx
     [(index row col)
      (define all-neighbors (hash LEFT (index row (sub1 col))
@@ -142,16 +155,24 @@
                                  UP (index (sub1 row) col)
                                  DOWN (index (add1 row) col)))
      (for/hash ([(dir idx) (in-hash all-neighbors)]
-                #:when (idx-in-bounds? idx))
+                #:when (idx-in-bounds? chunk idx))
        (values dir idx))]))
 
 ; Index -> Boolean
 ; is the index in bounds?
-(define (idx-in-bounds? idx)
+(define (idx-in-bounds? chunk idx)
   (match idx
     [(index row col)
-     (and (< -1 row CHUNK_HEIGHT)
-          (< -1 col CHUNK_WIDTH))]))
+     (and (< -1 row (chunk-height chunk))
+          (< -1 col (chunk-width chunk)))]))
+
+; Chunk -> Natural
+(define (chunk-width chunk)
+  (vector-length (vector-ref chunk 0)))
+
+; Chunk -> Natural
+(define (chunk-height chunk)
+  (vector-length chunk))
 
 ; Wave Wave Direction -> Wave
 ; constrains neighbor wave to be compatible with tiles in wave.
@@ -179,8 +200,8 @@
 ; find the index of a non-collapsed wave.
 ; return #f if there are none.
 (define (chunk-find-idx-to-collapse chunk)
-  (for*/or ([row (in-range CHUNK_HEIGHT)]
-               [col (in-range CHUNK_WIDTH)])
+  (for*/or ([row (in-range (chunk-height chunk))]
+               [col (in-range (chunk-width chunk))])
     (define idx (index row col))
     (define wave (chunk-get chunk idx))
     (and (not (wave-collapsed? wave)) idx)))
@@ -220,7 +241,11 @@
      [(== t-tile) "┬"]
      [(== bottom-tile) "┴"]
      [(== dashv-tile) "┤"]
-     [(== vdash-tile) "├"])))
+     [(== vdash-tile) "├"]
+     [(== right-tile) "╶"]
+     [(== left-tile) "╴"]
+     [(== up-tile) "╵"]
+     [(== down-tile) "╷"])))
 
 
 #;(module+ main
@@ -276,16 +301,16 @@ screw chunking and things being the same when you come back, just do infinite sc
 
 ; Chunk -> Void
 (define (chunk-walk-down! chunk)
-  (for ([row-num (in-range (sub1 CHUNK_HEIGHT))])
+  (for ([row-num (in-range (sub1 (chunk-height chunk)))])
     (vector-set! chunk row-num (vector-ref chunk (add1 row-num))))
-  (vector-set! chunk (sub1 CHUNK_HEIGHT) (for/vector ([_ CHUNK_WIDTH]) tiles)))
+  (vector-set! chunk (sub1 (chunk-height chunk)) (for/vector ([_ (chunk-width chunk)]) tiles)))
 
 (define (display-collapsed-chunk-last-row chunk)
   (for ([tile (vector-ref chunk (sub1 CHUNK_HEIGHT))])
     (display-tile tile))
   (newline))
 
-(module+ main
+#;(module+ main
   (define collapsed-chunk (make-collapsed-chunk))
   (display-collapsed-chunk collapsed-chunk)
   (let loop ([collapsed-chunk collapsed-chunk])
@@ -304,3 +329,141 @@ in a repeatable way. use absolute wave position or something based on index and 
 |#
 
 ; proper constant-space repeatable chunking
+
+; high level:
+; we have a grid of chunks infinitely expanding in all (2D) directions.
+; each chunk is procedurally generated, using its position as a random seed.
+; before generation, each chunk is surrounded by a "connectivity border" of straight and empty tiles (seeded by position),
+; which ensures that chunks properly connect to each other. After generation, this border is removed.
+; To seed the connectivity borders, we use half-positions like (position 0.5 0) for the vertial border between
+; (position 0 0) and (position 1 0). The former's chunk will use that seed for its right border and the latter for its left.
+
+; A Position is a
+(struct position [x y] #:transparent)
+; where x and y are integers.
+; increasing y is visually down.
+
+; Position -> CollapsedChunk
+; generate a chunk at the given position
+(define (generate-collapsed-chunk pos)
+  (define chunk (make-bordered-chunk pos))
+  ; ensure that if we walk away and come back, we get the same chunk.
+  (random-seed (->seed pos))
+  (chunk-fully-collapse! chunk)
+  (chunk-get-collapsed (chunk-remove-border chunk)))
+
+; Position -> Chunk
+; create an uncollapsed chunk with a connectivity border added.
+; takes in pos for seeding of connectivity border.
+(define (make-bordered-chunk pos)
+  (define chunk (make-initial-chunk (+ 2 CHUNK_WIDTH) (+ 2 CHUNK_HEIGHT)))
+  ; left border
+  (random-seed (->seed (list (- (position-x pos) 0.5) (position-y pos))))
+  (for ([row (in-range 1 (add1 CHUNK_HEIGHT))])
+    (chunk-set! chunk
+                (index row 0)
+                (list (random-ref (list empty-tile horizontal-tile)))))
+  ; right border
+  (random-seed (->seed (list (+ (position-x pos) 0.5) (position-y pos))))
+  (for ([row (in-range 1 (add1 CHUNK_HEIGHT))])
+    (chunk-set! chunk
+                (index row (add1 CHUNK_WIDTH))
+                (list (random-ref (list empty-tile horizontal-tile)))))
+  ; top border
+  (random-seed (->seed (list (position-x pos) (- (position-y pos) 0.5))))
+  (for ([col (in-range 1 (add1 CHUNK_WIDTH))])
+    (chunk-set! chunk
+                (index 0 col)
+                (list (random-ref (list empty-tile vertical-tile)))))
+  ; bottom border
+  (random-seed (->seed (list (position-x pos) (+ (position-y pos) 0.5))))
+  (for ([col (in-range 1 (add1 CHUNK_WIDTH))])
+    (chunk-set! chunk
+                (index (add1 CHUNK_HEIGHT) col)
+                (list (random-ref (list empty-tile vertical-tile)))))
+  (for ([idx (list (index 0 0)
+                   (index 0 (add1 CHUNK_WIDTH))
+                   (index (add1 CHUNK_HEIGHT) 0)
+                   (index (add1 CHUNK_HEIGHT) (add1 CHUNK_WIDTH)))])
+    (chunk-set! chunk idx (list empty-tile)))
+  chunk)
+
+; Chunk -> Chunk
+; make a new chunk without the border of the given chunk
+(define (chunk-remove-border chunk)
+  (for/vector ([row (in-range 1 (sub1 (chunk-height chunk)))])
+    (for/vector ([col (in-range 1 (sub1 (chunk-width chunk)))])
+      (chunk-get chunk (index row col)))))
+
+(define world-seed (random 4294967087))
+; Any -> Integer
+; generate a random seed suitable for random-seed from the given value.
+; within the same run, the same value will produce the same seed. but between runs,
+; it is different due to world-seed being randomly generated each run.
+(define (->seed v)
+  (modulo (+ world-seed (equal-hash-code v)) (sub1 (expt 2 31))))
+
+; drawing
+
+(define TILE_SIZE 24)
+
+; CollapsedChunk -> Image
+(define (draw-collapsed-chunk collapsed-chunk)
+  (apply above
+         (for/list ([row collapsed-chunk])
+           (apply beside
+                  (for/list ([tile row])
+                    (draw-tile tile))))))
+
+; Tile -> Image
+(define (draw-tile tile)
+  (define r (/ TILE_SIZE 2))
+  (for/fold ([img (rectangle TILE_SIZE TILE_SIZE "solid" "white")])
+            ([direction tile])
+    (match direction
+      [(== UP) (add-line img
+                         r r
+                         r 0
+                         "black")]
+      [(== DOWN) (add-line img
+                           r r
+                           r (* 2 r)
+                           "black")]
+      [(== LEFT) (add-line img
+                           r r
+                           0 r
+                           "black")]
+      [(== RIGHT) (add-line img
+                            r r
+                            (* 2 r) r
+                            "black")])))
+
+(define (handle-key pos key)
+  (match pos
+    [(position x y)
+     (match key
+       [(or "left" "a") (position (sub1 x) y)]
+       [(or "right" "d") (position (add1 x) y)]
+       [(or "up" "w") (position x (sub1 y))]
+       [(or "down" "s") (position x (add1 y))])]))
+
+(module+ main
+  (void (big-bang (position 0 0)
+                  [to-draw (lambda (pos) (draw-collapsed-chunk (generate-collapsed-chunk pos)))]
+                  [on-key handle-key])))
+
+; debugging
+
+(define (display-and-return v) (displayln v) v)
+(define (chunk-naive-collapse chunk)
+  (for/vector ([row chunk])
+    (for/vector ([wave row])
+      (first wave))))
+(define (debug-display-chunk chunk)
+  (for ([row chunk])
+    (for ([wave row])
+      (match wave
+        [(list) (display "?")]
+        [(list tile) (display-tile tile)]
+        [_ (display "*")]))
+    (newline)))
