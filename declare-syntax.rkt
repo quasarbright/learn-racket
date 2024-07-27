@@ -109,24 +109,24 @@
 ; Build up the environment mapping pattern variables to
 ; parts of the input SExpr.
 ; Assumes the pattern matches.
-(define (pattern-match pat expr)
+(define (pattern-match pat expr [depth 0])
   (match (list pat expr)
     [(list (? symbol? id) expr)
-     (hasheq id (cons 0 expr))]
+     (hasheq id (cons depth expr))]
     [(list '() '()) (hasheq)]
     [(list (list pat '...)
            exprs)
      (define envs
        (for/list ([expr exprs])
-         (pattern-match pat expr)))
+         (pattern-match pat expr (add1 depth))))
      (define env^ (combine-envs envs))
      ; this is necessary in case expr is '(). You'd get an empty environment.
-     (for/hasheq ([id (pattern-bound-vars pat)])
-       (values id (hash-ref env^ id '())))]
+     (for/hasheq ([(id depth) (in-hash (pattern-bound-vars pat (add1 depth)))])
+       (values id (hash-ref env^ id (cons depth '()))))]
     [(list (cons car-pat cdr-pat)
            (cons car-expr cdr-expr))
-     (hash-union (pattern-match car-pat car-expr)
-                 (pattern-match cdr-pat cdr-expr)
+     (hash-union (pattern-match car-pat car-expr depth)
+                 (pattern-match cdr-pat cdr-expr depth)
                  #:combine/key (lambda (id _ __) (error 'declare-syntax "duplicate pattern variable ~a" id)))]
     [_ (error 'pattern-match "pattern didn't match")]))
 
@@ -149,7 +149,11 @@
                                       [bad? three four]))
                 (hasheq 'cond (cons 0 'cond)
                         'cnd (cons 1 '(good? bad?))
-                        'body (cons 2 '((one two) (three four))))))
+                        'body (cons 2 '((one two) (three four)))))
+  (check-equal? (pattern-match '(e ...) '())
+                (hasheq 'e (cons 1 '())))
+  (check-equal? (pattern-match '((e ...) ...) '())
+                (hasheq 'e (cons 2 '()))))
 
 ; (Listof Env) -> Env
 ; combines the environments of an ellipsis sub-pattern's matches
@@ -160,20 +164,25 @@
                      (lambda (k v)
                        (match v
                          [(cons depth expr)
-                          (values k (cons (add1 depth) (list expr)))])))))
+                          (values k (cons depth (list expr)))])))))
   (apply hash-union
+         (hasheq)
          envs^
          #:combine (lambda (info1 info2) (cons (car info1) (append (cdr info1) (cdr info2))))))
 
-; Pat -> (Listof Symbol)
-(define (pattern-bound-vars pat)
+; Pat -> (Hasheq Symbol Natural)
+; maps bound variables to their ellipsis depths
+(define (pattern-bound-vars pat depth)
   (match pat
-    [(? symbol? id) (list id)]
-    ['() '()]
+    [(? symbol? id)
+     (hasheq id depth)]
+    ['()
+     (hasheq)]
     [(list pat '...)
-     (pattern-bound-vars pat)]
-    [(cons car-pat cdr-pat) (append (pattern-bound-vars car-pat)
-                                    (pattern-bound-vars cdr-pat))]
+     (pattern-bound-vars pat (add1 depth))]
+    [(cons car-pat cdr-pat)
+     (hash-union (pattern-bound-vars car-pat depth)
+                 (pattern-bound-vars cdr-pat depth))]
     [_ (error 'pattern-bound-vars "invalid pattern: ~a" pat)]))
 
 ; Template Env -> Expr
@@ -204,7 +213,9 @@
                                                 'b (cons 0 'd)))
                 '(c d))
   (check-equal? (template-expand '(a ...) (hasheq 'a (cons 1 '(b c d))))
-                '(b c d)))
+                '(b c d))
+  (check-equal? (template-expand '(a ...) (hasheq 'a (cons 1 '())))
+                '()))
 
 ; Template Env -> (Listof SExpr)
 ; expand an ellipsis sub-template for each expr in the env
