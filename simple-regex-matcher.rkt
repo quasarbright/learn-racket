@@ -20,6 +20,7 @@
 (struct alt [re1 re2] #:transparent)
 ; matches strings that match re1 or re2
 
+; a Stream is a
 (struct stream [text index] #:transparent)
 ; represents an input stream
 ; text is a String
