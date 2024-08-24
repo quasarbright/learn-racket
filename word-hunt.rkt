@@ -2,6 +2,9 @@
 
 (module+ test (require rackunit))
 (require racket/match racket/hash)
+(provide load-legal-words get-legal-words)
+(module+ main
+  (main))
 
 ; a bot to help me cheat at word hunt
 
@@ -40,23 +43,37 @@ Start out simple, then UI. Maybe port to js.
 
 (define BOARD_INPUT_PAT #px"^([a-z][a-z][a-z][a-z])\\s*([a-z][a-z][a-z][a-z])\\s*([a-z][a-z][a-z][a-z])\\s*([a-z][a-z][a-z][a-z])$")
 
+(define should-log? (make-parameter #t))
+(define (logln s)
+  (when (should-log?)
+    (displayln s)))
+(define (log s)
+  (when (should-log?)
+    (display s)))
+
 (define (main)
   (define legal-word-tree (get-legal-word-tree))
   (define legal-word-set (get-legal-word-set))
-  (display "input game board. rows can be separated by spaces, but must be on the same line.\n> ")
+  (log "input game board. rows can be separated by spaces, but must be on the same line.\n> ")
   (define line (read-line))
   (unless (regexp-match? BOARD_INPUT_PAT line)
     (raise-user-error "Invalid input. Please input 16 lowercase alphabetic characters"))
   (define board (string->board line))
-  (displayln "solving")
+  (logln "solving")
   (define words (solve board legal-word-tree legal-word-set))
-  (displayln "solved")
-  (displayln "words: \n")
+  (logln "solved")
+  (logln "words: \n")
   (for ([word (sort (remove-duplicates words) < #:key string-length)])
     (displayln word)))
 
-(module+ main
-  (main))
+(define (test s)
+  (define out (open-output-string))
+  (parameterize ([current-input-port (open-input-string s)]
+                 [current-output-port out]
+                 [should-log? #f])
+    (main))
+  (string-split (get-output-string out)
+                "\n"))
 
 ; String -> Board
 ; Assume string is 16 lowercase alphabetic characters.
@@ -67,14 +84,13 @@ Start out simple, then UI. Maybe port to js.
 (module+ test
   (check-equal? (string->board "oatrihpshtnrenei")
                 example-board))
-
 ; -> WordTree
 (define (get-legal-word-tree)
   (define legal-words (get-legal-words))
-  (displayln "building prefix tree")
+  (logln "building prefix tree")
   (begin0
       (words->word-tree legal-words)
-    (displayln "built prefix tree")))
+    (logln "built prefix tree")))
 
 ; -> (Set String)
 (define (get-legal-word-set)
@@ -84,11 +100,11 @@ Start out simple, then UI. Maybe port to js.
 ; -> (Listof String)
 (define legal-words-promise
   (delay
-    (displayln "reading dictionary")
+    (logln "reading dictionary")
     (begin0 (for/list ([line (file->lines DICTIONARY_PATH)]
                        #:unless (= 0 (string-length line)))
               (string-downcase line))
-      (displayln "read dictionary"))))
+      (logln "read dictionary"))))
 (define (get-legal-words)
   (force legal-words-promise))
 ; -> Void
@@ -131,7 +147,7 @@ Start out simple, then UI. Maybe port to js.
 
 (module+ test
   (check-equal? (groupby '(1 2 3 4) (lambda (n) (modulo n 2)))
-                (hasheq 0 '(2 4) 1 '(1 3))))
+                (make-hasheq (list (cons 0 '(4 2)) (cons 1 '(3 1))))))
 
 ; Board WordTree (Set String) -> (Listof String)
 ; Find all playable words.
@@ -149,27 +165,18 @@ Start out simple, then UI. Maybe port to js.
 
 ; Find all playable words starting at index
 (define (solve/index board idx word-tree word-set)
-  ; bfs
-  (define seen (mutable-set))
-  (define queue (list (list idx (list idx) (hash-ref word-tree (board-get board idx) (hasheq)))))
-  (define (pop!)
-    (begin0 (first queue)
-      (set! queue (rest queue))))
+  ; dfs
   (define words (list))
-  (let loop ()
-    (unless (null? queue)
-      (match-define (list idx path tree) (pop!))
-      (unless (set-member? seen idx)
-        (set-add! seen idx)
-        (define word (board-indices->word board (reverse path)))
-        (when (set-member? word-set word)
-          (set! words (cons word words)))
-        (define children
-          (for/list ([idx^ (get-neighboring-indices idx)]
-                     #:when (hash-has-key? tree (board-get board idx^)))
-            (list idx^ (cons idx^ path) (hash-ref tree (board-get board idx^)))))
-        (set! queue (append queue children)))
-      (loop)))
+  (let loop ([idx idx]
+             [path (list idx)]
+             [tree (hash-ref word-tree (board-get board idx) (hasheq))])
+    (define word (board-indices->word board (reverse path)))
+    (when (set-member? word-set word)
+      (set! words (cons word words)))
+    (for ([idx^ (get-neighboring-indices idx)]
+          #:when (hash-has-key? tree (board-get board idx^))
+          #:unless (member idx^ path))
+      (loop idx^ (cons idx^ path) (hash-ref tree (board-get board idx^)))))
   words)
 
 (module+ test
@@ -204,6 +211,16 @@ Start out simple, then UI. Maybe port to js.
 
 (module+ test
   (check-equal? (get-neighboring-indices (index 0 0))
-                (list (index 0 1)
-                      (index 1 0)
-                      (index 1 1))))
+                (list             (index 0 1)
+                      (index 1 0) (index 1 1)))
+  (check-equal? (get-neighboring-indices (index 1 1))
+                (list (index 0 0) (index 0 1) (index 0 2)
+                      (index 1 0)             (index 1 2)
+                      (index 2 0) (index 2 1) (index 2 2)))
+  (check-equal? (get-neighboring-indices (index 3 3))
+                (list (index 2 2) (index 2 3)
+                      (index 3 2))))
+
+(module+ test
+  (check-not-false (member "high" (test "memi legh dail ayoh")))
+  (check-not-false (member "day" (test "memi legh dail ayoh"))))
