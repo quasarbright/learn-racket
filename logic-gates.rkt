@@ -1,6 +1,6 @@
 #lang racket
 
-; little logic gate DSL
+; little logic circuit DSL
 ; this file contains the runtime and design notes
 
 #|
@@ -58,12 +58,12 @@ x : t means "x can be used as a t", not "x is a t". idc about "is a".
 
 t := in, out, inout
 
-subtyping: t1 <: t2 means "any t2 can be used as a t1"
-in <: inout
-out <: inout
+subtyping: t1 <: t2 means "any t1 can be used as a t2"
+inout <: in
+inout <: out
 t <: t
 
-generally, passed arguments must be supertypes of expected argument types
+generally, passed arguments must be subtypes of expected argument types
 specifically:
 supplying an out where an in is expected is an error since the callee module will use it as an input.
 supplying an out where an inout is expected is an error since it may be used as an input in the callee module
@@ -147,18 +147,19 @@ going to go with cellular automaton
 (provide
  circuit
  circuit?
- gate?
+ (struct-out gate)
  port?
  (struct-out input-port)
  (struct-out output-port)
- wire?
+ (struct-out wire)
  circuit-debug
  (contract-out
   [circuit-run! (-> circuit? void?)]
   [circuit-step! (-> circuit? void?)]
   [circuit-reset! (-> circuit? void?)]
   [circuit-port-powered? (-> circuit? port? boolean?)]
-  [set-circuit-port-powered?! (-> circuit? port? boolean? void?)]))
+  [set-circuit-port-powered?! (-> circuit? port? boolean? void?)]
+  [circuit-union (->* () #:rest (listof circuit?) circuit?)]))
 (require racket/match)
 
 ; runtime
@@ -187,7 +188,14 @@ going to go with cellular automaton
 ; Represents the interfaces of a logic gate
 
 ; A Wire is a
-(struct wire [output input])
+(struct wire [output input]
+  #:transparent
+  #:guard (lambda (output input name)
+            (unless (input-port? input)
+              (error "wire input must be an input port"))
+            (unless (output-port? output)
+              (error "wire output must be an output port"))
+            (values output input)))
 ; where
 ; input is an input port
 ; output is an output port
@@ -363,3 +371,17 @@ going to go with cellular automaton
     (circuit-step! nand)
     (check-equal? (circuit-powered-ports nand)
                   (seteq out))))
+
+; Circuit ... -> Circuit
+(define (circuit-union . circs)
+  (for/fold ([u (circuit (list) (list) (seteq))])
+            ([circ circs])
+    (circuit-union/bin u circ)))
+
+; Circuit Circuit -> Circuit
+(define (circuit-union/bin u circ)
+  (define powereds (mutable-seteq))
+  (set-union! powereds (circuit-powered-ports u) (circuit-powered-ports circ))
+  (circuit (append (circuit-gates u) (circuit-gates circ))
+           (append (circuit-wires u) (circuit-wires circ))
+           powereds))
