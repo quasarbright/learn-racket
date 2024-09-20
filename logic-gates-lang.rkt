@@ -12,7 +12,8 @@
          (prefix-in rt: "./logic-gates.rkt"))
 
 (syntax-spec
-  (binding-class wire-var)
+  (binding-class wire-var
+                 #:binding-space logic-module)
   (binding-class module-name
                  #:binding-space logic-module)
   (extension-class module-macro
@@ -37,18 +38,20 @@
     (define-module/core (m:module-name [x:wire-var (~datum :) t:wire-type] ...)
       body:module-expr)
     #:binding [(export m) (scope (bind x) ... (import body))]
-    #:lhs [#'m]
+    #:lhs [(define ts (for/list ([t (attribute t)]) (parse-type t)))
+           (declare-module-type! #'m ts)
+           #'m]
     #:rhs [(define ts (for/list ([t (attribute t)]) (parse-type t)))
            (for ([x (attribute x)]
                  [t ts])
              (declare-wire-type! x t))
-           (declare-module-type! #'m ts)
            (check-expr #'body)
            #'(compile-define-module (m x ...) body)])
   (host-interface/definition
     (define-gate (m:module-name x:racket-var ...) body:racket-expr ...+)
     #:binding [(export m) (scope (bind x) ... body ...)]
-    #:lhs [#'m]
+    #:lhs [(declare-module-type! #'m (append (for/list ([_ (attribute x)]) 'in) (list 'out)))
+           #'m]
     #:rhs [#'(compile-define-gate (m x ...) body ...)])
   (host-interface/definition
     (define-circuit/core c:racket-var body:module-expr)
@@ -224,7 +227,7 @@ I don't like that, but alternatives seem like a pain.
         ...)
        (sort-module-exprs bodies))
      #'(lambda (x ...)
-         (define wire-name (local-wire (mutable-set)))
+         (define wire-name (local-wire (mutable-set) (mutable-set)))
          ...
          (apply circuit-union
                 (list (rator rand ...)
@@ -271,11 +274,11 @@ I don't like that, but alternatives seem like a pain.
                [(local-wire inputs outputs)
                 (cond
                   [(input-port? prt)
-                   (local-wire-add-input! prt)
+                   (local-wire-add-input! arg prt)
                    (for/list ([out outputs])
                      (wire out prt))]
                   [else
-                   (local-wire-add-output! prt)
+                   (local-wire-add-output! arg prt)
                    (for/list ([in inputs])
                      (wire prt in))])]))))
 
@@ -322,11 +325,18 @@ I don't like that, but alternatives seem like a pain.
          (circuit-union in-circ (m)))]))
 
 ; sugar
-
+(begin-for-syntax
+  (define-syntax-class module-arg-decl
+    (pattern x:id
+             #:attr name #'x
+             #:attr type #'inout)
+    (pattern [x:id (~datum :) t]
+             #:attr name #'x
+             #:attr type #'t)))
 (define-syntax define-module
   (syntax-parser
-    [(_ (m (~or x [y (~datum :) t]) ...) body ...)
-     #'(define-module/core (m [(~? x y) : (~? t inout)] ...)
+    [(_ (m d:module-arg-decl ...) body ...)
+     #'(define-module/core (m [d.name : d.type] ...)
          (begin body ...))]))
 
 (define-syntax-rule
@@ -352,5 +362,109 @@ I don't like that, but alternatives seem like a pain.
     (define-output out)
     (define-circuit circ (not in out))
     (check-equal? (get-output circ out) #f)
+
     (circuit-run! circ)
-    (check-equal? (get-output circ out) #t)))
+    (check-equal? (get-output circ out) #t)
+
+    (set-input! in #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #f)
+    )
+  (test-case "and"
+    (define-gate (and a b) (and a b))
+    (define-input in1)
+    (define-input in2)
+    (define-output out)
+    (define-circuit circ (and in1 in2 out))
+    (check-equal? (get-output circ out) #f)
+
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #f)
+
+    (set-input! in1 #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #f)
+
+    (set-input! in2 #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #t)
+
+    (set-input! in1 #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #f))
+  (test-case "nand"
+    (define-gate (and a b) (and a b))
+    (define-gate (not a) (not a))
+    (define-module (nand [a : in] [b : in] [out : out])
+      (define-wire tmp)
+      (and a b tmp)
+      (not tmp out))
+    (define-input in1)
+    (define-input in2)
+    (define-output out)
+    (define-circuit circ (nand in1 in2 out))
+    (check-equal? (get-output circ out) #f)
+
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #t)
+
+    (set-input! in1 #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #t)
+
+    (set-input! in2 #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #f)
+
+    (set-input! in1 #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #t))
+  (test-case "latch"
+    (define-gate (nor a b) (not (or a b)))
+    (define-gate (id a) a)
+    (define-module (sr-latch [r : in] [s : in] [q : out])
+      (define-wire w1)
+      (define-wire w2)
+      (nor r w2 w1)
+      (nor s w1 w2)
+      (id w1 q))
+    (define-input r)
+    (define-input s)
+    (define-output q)
+    (define-circuit circ (sr-latch r s q))
+
+    ; initially off
+    (set-input! r #t)
+    (set-input! s #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ q) #f)
+
+    ; stays stable when nothing is on
+    (set-input! r #f)
+    (set-input! s #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ q) #f)
+
+    ; set to 1
+    (set-input! r #f)
+    (set-input! s #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ q) #t)
+
+    ; remembers 1 when inputs are off
+    (set-input! r #f)
+    (set-input! s #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ q) #t)
+
+    ; setting to 1 after does nothing
+    (set-input! r #f)
+    (set-input! s #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ q) #t)
+
+    ; finally reset
+    (set-input! r #t)
+    (set-input! s #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ q) #f)))
