@@ -159,7 +159,8 @@ going to go with cellular automaton
   [circuit-reset! (-> circuit? void?)]
   [circuit-port-powered? (-> circuit? port? boolean?)]
   [set-circuit-port-powered?! (-> circuit? port? boolean? void?)]
-  [circuit-union (->* () #:rest (listof circuit?) circuit?)]))
+  [circuit-union (->* () #:rest (listof circuit?) circuit?)]
+  [circuit->datum (-> circuit? any)]))
 (require racket/match)
 
 ; runtime
@@ -173,7 +174,7 @@ going to go with cellular automaton
 ; Represents a running logic circuit.
 
 ; a Gate is a
-(struct gate [inputs output proc])
+(struct gate [name inputs output proc] #:property prop:object-name 0)
 ; where
 ; inputs is a list of input ports
 ; output is an output port
@@ -182,7 +183,8 @@ going to go with cellular automaton
 ; Represents a logic gate
 
 ; A Port is one of
-(struct port [])
+(struct port [name] #:property prop:object-name 0)
+
 (struct input-port port [])
 (struct output-port port [])
 ; Represents the interfaces of a logic gate
@@ -206,11 +208,11 @@ going to go with cellular automaton
 ; a-->|\
 ;     | |-->out
 ; b-->|/
-(define and-a (input-port))
-(define and-b (input-port))
-(define and-out (output-port))
+(define and-a (input-port 'a))
+(define and-b (input-port 'b))
+(define and-out (output-port 'out))
 (define and-circuit
-  (let ([and-gate (gate (list and-a and-b) and-out (lambda (a b) (and a b)))])
+  (let ([and-gate (gate 'and (list and-a and-b) and-out (lambda (a b) (and a b)))])
     (circuit (list and-gate) (list) (seteq))))
 
 (module+ test
@@ -274,7 +276,7 @@ going to go with cellular automaton
 ; Should the gate's output be powered based on its inputs?
 ; Runs the gate's procedure with the current values of its input ports.
 (define (circuit-gate-run circ gat)
-  (match-define (gate inputs _ proc) gat)
+  (match-define (gate _ inputs _ proc) gat)
   (apply proc (for/list ([in inputs]) (circuit-port-powered? circ in))))
 
 ; Circuit OutputPort -> (Listof InputPort)
@@ -313,9 +315,9 @@ going to go with cellular automaton
   (test-case "clock stepping"
     ; clock that changes every other tick
     ; can make a 1-tick clock by hooking this up to an xor
-    (define in (input-port))
-    (define out (output-port))
-    (define not-gate (gate (list in) out not))
+    (define in (input-port 'in))
+    (define out (output-port 'out))
+    (define not-gate (gate 'not (list in) out not))
     (define clock (circuit (list not-gate) (list (wire out in)) (seteq)))
     (check-equal? (circuit-port-powered? clock out) #f)
     (check-equal? (circuit-port-powered? clock in) #f)
@@ -340,13 +342,13 @@ going to go with cellular automaton
     (check-equal? (circuit-port-powered? clock out) #t)
     (check-equal? (circuit-port-powered? clock in) #f))
   (test-case "nand"
-    (define a (input-port))
-    (define b (input-port))
-    (define and-out (output-port))
-    (define not-in (input-port))
-    (define out (output-port))
-    (define and-gate (gate (list a b) and-out (lambda (a b) (and a b))))
-    (define not-gate (gate (list not-in) out not))
+    (define a (input-port 'a))
+    (define b (input-port 'b))
+    (define and-out (output-port 'and-out))
+    (define not-in (input-port 'not-in))
+    (define out (output-port 'out))
+    (define and-gate (gate 'and (list a b) and-out (lambda (a b) (and a b))))
+    (define not-gate (gate 'not (list not-in) out not))
     (define nand (circuit (list and-gate not-gate)
                           (list (wire and-out not-in))
                           (seteq)))
@@ -369,6 +371,7 @@ going to go with cellular automaton
                   (seteq out))
     ; stable
     (circuit-step! nand)
+    (displayln (circuit->datum nand))
     (check-equal? (circuit-powered-ports nand)
                   (seteq out))))
 
@@ -385,3 +388,28 @@ going to go with cellular automaton
   (circuit (append (circuit-gates u) (circuit-gates circ))
            (append (circuit-wires u) (circuit-wires circ))
            powereds))
+
+; Circuit -> Datum
+; for debugging
+(define (circuit->datum circ)
+  (list 'circuit
+        (cons 'gates (for/list ([gat (circuit-gates circ)])
+                       (gate->datum gat)))
+        (cons 'powered-ports (for/list ([prt (circuit-powered-ports circ)])
+                               (object-name prt)))
+        (cons 'wires (for/list ([wir (circuit-wires circ)])
+                       (wire->datum wir)))))
+
+; Gate -> Datum
+; for debugging
+(define (gate->datum gat)
+  (list (object-name gat) (append (for/list ([prt (gate-inputs gat)]) (object-name prt))
+                                  '(->)
+                                  (list (object-name (gate-output gat))))))
+
+; Wire -> Datum
+; for debugging
+(define (wire->datum wir)
+  (list (object-name (wire-output wir))
+        '->
+        (object-name (wire-input wir))))

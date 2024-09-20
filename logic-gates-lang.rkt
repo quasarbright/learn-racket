@@ -3,8 +3,10 @@
 ; frontend language for logic circuit DSL
 
 (module+ test (require rackunit))
-(provide)
+(provide (all-defined-out))
 (require (for-syntax racket/list racket/match syntax/parse)
+         racket/pretty
+         racket/syntax
          syntax-spec
          "./logic-gates.rkt"
          (prefix-in rt: "./logic-gates.rkt"))
@@ -19,7 +21,7 @@
     #:allow-extension module-macro
     #:binding-space logic-module
     (begin e:module-expr ...+)
-    #:binding (re-export e)
+    #:binding [(re-export e) ...]
     (define-wire x:wire-var)
     #:binding (export x)
     (#%module-app m:module-name x:wire-var ...)
@@ -34,7 +36,7 @@
   (host-interface/definition
     (define-module/core (m:module-name [x:wire-var (~datum :) t:wire-type] ...)
       body:module-expr)
-    #:binding [(export m) (scope (bind x) (import body))]
+    #:binding [(export m) (scope (bind x) ... (import body))]
     #:lhs [#'m]
     #:rhs [(define ts (for/list ([t (attribute t)]) (parse-type t)))
            (for ([x (attribute x)]
@@ -45,18 +47,18 @@
            #'(compile-define-module (m x ...) body)])
   (host-interface/definition
     (define-gate (m:module-name x:racket-var ...) body:racket-expr ...+)
-    #:binding [(export m) (scope (bind x) body)]
+    #:binding [(export m) (scope (bind x) ... body ...)]
     #:lhs [#'m]
     #:rhs [#'(compile-define-gate (m x ...) body ...)])
   (host-interface/definition
     (define-circuit/core c:racket-var body:module-expr)
     #:binding [(export c) (scope (import body))]
     #:lhs [#'c]
-    #:rhs [ #'(compile-define-circuit c body)])
+    #:rhs [#'(compile-define-circuit c body)])
   (host-interface/definition
     (define-input x:wire-var)
     #:binding (export x)
-    #:lhs [#'x]
+    #:lhs [(symbol-set-add! input-names #'x) #'x]
     #:rhs [#'(compile-define-input x)])
   (host-interface/definition
     (define-output x:wire-var)
@@ -232,7 +234,7 @@ I don't like that, but alternatives seem like a pain.
   ; (Listof module-expr) -> (Listof module-expr)
   (define (sort-module-exprs bodies)
     (sort bodies <
-          (syntax-parser
+          #:key (syntax-parser
             #:datum-literals (define-wire #%module-app)
             [(define-wire . _) 0]
             [(#%module-app . _) 1]))))
@@ -240,14 +242,13 @@ I don't like that, but alternatives seem like a pain.
 (define-syntax compile-define-gate
   (syntax-parser
     [(_ (m x ...) body ...)
-     (define/syntax-parse (x-value ...) (generate-temporaries (attribute x)))
      (define/syntax-parse (x-port ...) (generate-temporaries (attribute x)))
      #'(lambda (x ... out)
-         (define x-port (input-port))
+         (define x-port (rt:input-port (gensym (format-symbol "~a-~a" 'm 'x))))
          ...
-         (define out-port (output-port))
-         (define proc (lambda (x-value ...) body ...))
-         (define gat (gate (list x-port ...) out-port proc))
+         (define out-port (rt:output-port (gensym (format-symbol "~a-~a" 'm 'out))))
+         (define proc (lambda (x ...) body ...))
+         (define gat (gate 'm (list x-port ...) out-port proc))
          (circuit (list gat)
                   (module-gate-wires (list x ... out) (list x-port ... out-port))
                   (seteq)))]))
@@ -291,12 +292,11 @@ I don't like that, but alternatives seem like a pain.
 (define-syntax compile-define-input
   (syntax-parser
     [(_ x)
-     (symbol-set-add! input-names #'x)
-     #'(input (output-port) #f)]))
+     #'(input (rt:output-port 'x) #f)]))
 
 (define-syntax-rule
   (compile-define-output x)
-  (output (input-port)))
+  (output (rt:input-port 'x)))
 
 (define-syntax-rule
   (compile-set-input! x v)
@@ -313,12 +313,12 @@ I don't like that, but alternatives seem like a pain.
      (define/syntax-parse (in ...) (filter input-name? free-ids))
      #'(let ()
          (define in-gates
-           (list (gate (list) (input-port in) (lambda () (input-value in)))
+           (list (gate (format-symbol "~a-~a" 'c 'in) (list) (input-port in) (lambda () (input-value in)))
                  ...))
          (define in-circ
            (circuit in-gates (list) (seteq)))
-         (define-module (m)
-           body)
+         (define m
+           (compile-define-module (m) body))
          (circuit-union in-circ (m)))]))
 
 ; sugar
@@ -334,22 +334,23 @@ I don't like that, but alternatives seem like a pain.
   (define-circuit/core c (begin body ...)))
 
 (module+ test
+  (test-case "id"
+    (define-gate (id a) a)
+    (define-input in)
+    (define-output out)
+    (define-circuit circ (id in out))
+    (check-equal? (get-output circ out) #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #f)
+
+    (set-input! in #t)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #t))
   (test-case "not"
-    2
-
-    #;(set-input! in #f)
-    #;(circuit-run! circ)
-    #;(check-equal? (get-output circ out) #t)))
-; in here, we get `not` not bound
-(let ()
-  (define-gate (not a) (not a))
-  (define-input in)
-  (define-output out)
-  (define-circuit circ (not in out))
-  2)
-
-; out here, we get `a` not bout
-(define-gate (not a) (not a))
-(define-input in)
-(define-output out)
-(define-circuit circ (not in out))
+    (define-gate (not a) (not a))
+    (define-input in)
+    (define-output out)
+    (define-circuit circ (not in out))
+    (check-equal? (get-output circ out) #f)
+    (circuit-run! circ)
+    (check-equal? (get-output circ out) #t)))
