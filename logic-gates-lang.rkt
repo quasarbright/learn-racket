@@ -3,7 +3,9 @@
 ; frontend language for logic circuit DSL
 
 (module+ test (require rackunit))
-(provide (all-defined-out))
+(provide (all-defined-out)
+         (for-space logic-module (all-defined-out))
+         (for-space logic-wire-type (all-defined-out)))
 (require (for-syntax racket/list racket/match syntax/parse)
          racket/pretty
          racket/syntax
@@ -343,6 +345,11 @@ I don't like that, but alternatives seem like a pain.
   (define-circuit c body ...)
   (define-circuit/core c (begin body ...)))
 
+(define-dsl-syntax define-wires module-macro
+  (syntax-rules ()
+    [(define-wires w ...)
+     (begin (define-wire w) ...)]))
+
 (module+ test
   (test-case "id"
     (define-gate (id a) a)
@@ -478,25 +485,12 @@ I don't like that, but alternatives seem like a pain.
     (define-output out)
     (define-circuit circ (clock out))
     (circuit-step! circ)
-    (circuit-step! circ)
-    (circuit-step! circ)
 
     (circuit-step! circ)
     (check-equal? (get-output circ out) #t)
-    (circuit-step! circ)
-    (check-equal? (get-output circ out) #t)
-
     (circuit-step! circ)
     (check-equal? (get-output circ out) #f)
     (circuit-step! circ)
-    (check-equal? (get-output circ out) #f)
-
-    (circuit-step! circ)
     (check-equal? (get-output circ out) #t)
-    (circuit-step! circ)
-    (check-equal? (get-output circ out) #t)
-
-    (circuit-step! circ)
-    (check-equal? (get-output circ out) #f)
     (circuit-step! circ)
     (check-equal? (get-output circ out) #f)))

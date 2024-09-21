@@ -140,7 +140,10 @@ Options for how to handle time:
   - in the next state, an input will be powered if any of the outputs connected to it are powered in the current state.
   - in the next state, an output will be powered if its gate outputs true based on its inputs in the current state.
 
+
 going to go with cellular automaton
+ended up changing it a little. outputs immediately power inputs
+
 |#
 
 (module+ test (require rackunit))
@@ -252,7 +255,7 @@ going to go with cellular automaton
 ; Circuit -> Void
 ; Step the circuit.
 ; Update each output according to its current inputs and logic gate procedure.
-; Update each input according to the output(s) connected to it.
+; Update each input according to the output(s) connected to it and their NEW values.
 (define (circuit-step! circ)
   (define powered-outputs
     (for/seteq ([gat (circuit-gates circ)]
@@ -260,9 +263,7 @@ going to go with cellular automaton
       (gate-output gat)))
   (define powered-inputs
     (for/fold ([powered-inputs (seteq)])
-              ([gat (circuit-gates circ)]
-               #:when (circuit-gate-powered? circ gat))
-      (define out (gate-output gat))
+              ([out powered-outputs])
       (define ins (for/seteq ([in (circuit-output-children circ out)]) in))
       (set-union powered-inputs ins)))
   (define new-powereds (set-union powered-outputs powered-inputs))
@@ -324,14 +325,6 @@ going to go with cellular automaton
 
     (circuit-step! clock)
     (check-equal? (circuit-port-powered? clock out) #t)
-    (check-equal? (circuit-port-powered? clock in) #f)
-
-    (circuit-step! clock)
-    (check-equal? (circuit-port-powered? clock out) #t)
-    (check-equal? (circuit-port-powered? clock in) #t)
-
-    (circuit-step! clock)
-    (check-equal? (circuit-port-powered? clock out) #f)
     (check-equal? (circuit-port-powered? clock in) #t)
 
     (circuit-step! clock)
@@ -340,6 +333,10 @@ going to go with cellular automaton
 
     (circuit-step! clock)
     (check-equal? (circuit-port-powered? clock out) #t)
+    (check-equal? (circuit-port-powered? clock in) #t)
+
+    (circuit-step! clock)
+    (check-equal? (circuit-port-powered? clock out) #f)
     (check-equal? (circuit-port-powered? clock in) #f))
   (test-case "nand"
     (define a (input-port 'a))
@@ -356,22 +353,15 @@ going to go with cellular automaton
     (set-circuit-powered-ports! nand (seteq a b))
     (circuit-step! nand)
     (check-equal? (circuit-powered-ports nand)
-                  (seteq and-out out))
+                  (seteq and-out not-in out))
     (circuit-step! nand)
-    (check-equal? (circuit-powered-ports nand)
-                  ; out should still be powered since it didn't get not-in yet
-                  (seteq not-in out))
-    (circuit-step! nand)
-    ; output: false
     (check-equal? (circuit-powered-ports nand)
                   (seteq))
-
     (circuit-step! nand)
     (check-equal? (circuit-powered-ports nand)
                   (seteq out))
-    ; stable
+
     (circuit-step! nand)
-    (displayln (circuit->datum nand))
     (check-equal? (circuit-powered-ports nand)
                   (seteq out))))
 
