@@ -5,7 +5,9 @@
 (module+ test (require rackunit))
 (provide (all-defined-out)
          (for-space logic-module (all-defined-out))
-         (for-space logic-wire-type (all-defined-out)))
+         (for-space logic-wire-type (all-defined-out))
+         circuit-step!
+         circuit-run!)
 (require (for-syntax racket/list racket/match syntax/parse)
          racket/pretty
          racket/syntax
