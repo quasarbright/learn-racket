@@ -25,13 +25,15 @@
   (nonterminal/exporting module-expr
     #:allow-extension module-macro
     #:binding-space logic-module
-    (begin e:module-expr ...+)
+    (begin e:module-expr ...)
     #:binding [(re-export e) ...]
     (define-wire x:wire-var)
     #:binding (export x)
     (#%module-app m:module-name x:wire-var ...)
-    (~> (m:id x:id ...)
-        #'(#%module-app m x ...)))
+    (~> (m:id x ...)
+        ; this is a macro that compiles (and (not a _) b)
+        ; to (begin (define-wire tmp) (not a tmp) (and tmp b))
+        #'(module-app m x ...)))
   (nonterminal wire-type
     #:binding-space logic-wire-type
     in
@@ -138,7 +140,7 @@
   (define (flatten-begins stx)
     (syntax-parse stx
       #:datum-literals (begin define-wire #%module-app)
-      [(begin e ...+)
+      [(begin e ...)
        (define ess (map flatten-begins (attribute e)))
        (append* ess)]
       [_ (list this-syntax)]))
@@ -352,6 +354,39 @@ I don't like that, but alternatives seem like a pain.
     [(define-wires w ...)
      (begin (define-wire w) ...)]))
 
+; anf pass
+; converts (not (and a b _) out) to (begin (define-wire tmp) (and a b tmp) (not tmp out))
+(define-dsl-syntax module-app module-macro
+  (syntax-parser
+    [(_ m arg ...)
+     (define-values (expr args) (to-immediate* (attribute arg)))
+     (define/syntax-parse (arg^ ...) args)
+     #`(begin #,expr (#%module-app m arg^ ...))]))
+
+(begin-for-syntax
+  ; returns a module expr (really a bunch combined with begin) and a list of wire vars
+  (define (to-immediate* args)
+      (for/fold ([expr #'(begin)]
+                 [xs '()])
+                ([arg args])
+        (define-values (expr^ x) (to-immediate arg))
+        (values #`(begin #,expr^ #,expr) (append xs (list x)))))
+  ; returns a module expr (really a bunch combined with begin) and a wire var
+  (define (to-immediate stx)
+    (syntax-parse stx
+      [(m arg1 ... (~datum _) arg2 ...)
+       (define-values (expr1 xs1) (to-immediate* (attribute arg1)))
+       (define-values (expr2 xs2) (to-immediate* (attribute arg2)))
+       (define/syntax-parse (x1 ...) xs1)
+       (define/syntax-parse (x2 ...) xs2)
+       (define/syntax-parse (tmp) (generate-temporaries '(_tmp)))
+       (define/syntax-parse expr #'(m x1 ... tmp x2 ...))
+       (values #`(begin (define-wire tmp) #,expr1 expr #,expr2)
+               #'tmp)]
+      [x:id (values #`(begin) this-syntax)]
+      [(m arg ...)
+       (raise-syntax-error this-syntax "inner module applications must use _")])))
+
 (module+ test
   (test-case "id"
     (define-gate (id a) a)
@@ -405,9 +440,7 @@ I don't like that, but alternatives seem like a pain.
     (define-gate (and a b) (and a b))
     (define-gate (not a) (not a))
     (define-module (nand [a : in] [b : in] [out : out])
-      (define-wire tmp)
-      (and a b tmp)
-      (not tmp out))
+      (not (and a b _) out))
     (define-input in1)
     (define-input in2)
     (define-output out)

@@ -86,10 +86,7 @@
 ; delay of 4
 ; like sr latch, but only does anything when e is on
 (define-module (gated-sr-latch [e : in] [r : in] [s : in] [q : out])
-  (define-wires r^ s^)
-  (and e r r^)
-  (and e s s^)
-  (sr-latch r^ s^ q))
+  (sr-latch (and e r _) (and e s _) q))
 
 (module+ test
   (test-case "gated-sr-latch"
@@ -117,7 +114,7 @@
 (define-module (d-latch [e : in] [d : in] [q : out])
   (define-wires not-d)
   (not d not-d)
-  (gated-sr-latch e not-d d q))
+  (gated-sr-latch e (not d _) d q))
 
 (module+ test
   (test-case "d-latch"
@@ -142,8 +139,7 @@
 ; stores d on rising edge of clock
 (define-module (d-flip-flop [clock : in] [d : in] [q : out])
   (define-wires not-clock inner-q)
-  (not clock not-clock)
-  (d-latch not-clock d inner-q)
+  (d-latch (not clock _) d inner-q)
   (d-latch clock inner-q q))
 
 (module+ test
@@ -170,17 +166,11 @@
 (define-module (1-bit-register [e : in] [clock : in] [d : in] [q : out])
   ; could just do (d-flip-flop d (and e clock _) q),
   ; but then it'd store on rising edge of e.
-  (define-wires
-    not-e
-    and-d-e
-    and-not-e-q^
-    q^
-    inner-d)
-  (and d e and-d-e)
-  (not e not-e)
-  (and not-e q^ and-not-e-q^)
-  (or and-not-e-q^ and-d-e inner-d)
-  (d-flip-flop clock inner-d q^)
+  (define-wire q^)
+  (d-flip-flop clock
+               (or (and (not e _) q^ _)
+                   (and d e _) _)
+               q^)
   (identity q^ q))
 
 (module+ test
@@ -225,19 +215,11 @@
   (1-bit-register e clock in-3 out-3))
 
 (define-module (full-adder [a : in] [b : in] [c : in] [sum : out] [carry : out])
-  (define-wires
-    xor-ab
-    and-ab
-    and-ac
-    and-bc
-    or-ab-ac)
-  (xor a b xor-ab)
-  (xor xor-ab c sum)
-  (and a b and-ab)
-  (and a c and-ac)
-  (and b c and-bc)
-  (or and-ab and-ac or-ab-ac)
-  (or or-ab-ac and-bc carry))
+  (xor (xor a b _) c sum)
+  (or (and a b _)
+      (or (and a c _)
+          (and b c _) _)
+      carry))
 
 (module+ test
   (test-case "full-adder"
