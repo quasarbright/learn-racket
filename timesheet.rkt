@@ -95,10 +95,28 @@
 ; - are you clocked in?
 ; P1
 ; - some way of specifying you've been paid for your time?
+;   - you work in hours but get paid in dollars. the conversion rate is not necessarily constant. how should this be managed?
+;   - each interval/period has an hourly rate associated with it
+;   - the timesheet has a current hourly rate that used as the default when logging work
+;   - no need to mark a particular interval/period as paid for. just total money vs sum(hours * rate)
+;   - track when you got paid how much? yeah, log payments by day like periods. no need to track total paid directly.
+;   - UI:
+;     - (unpaid-hours) how many hours of work you haven't been paid for
+;     - (money-owed) returns how much money you are owed
+;     - (hourly-rate) returns current hourly rate
+;     - (set-hourly-rate! rate) obvious
+;     - (add-payment! amount [description])
+;     - new optional kwarg on clock-in, clock-out, and add-period: rate. defaults to current rate. Ex: (clock-in! (now) #:rate 40)
+;    - what if no hourly rate is set?
+;      - default to zero?
+;      - add an operation to retroactively put rate?
+;      - print a warning?
+;      - don't worry about it until you run into that use-case. for now, default to zero without warning.
+;    - if start and end have different rates, use the end's rate.
 
 ; can only have one clock-in at a time
 
-#;(module+ main
+(module+ main
   (create-timesheet!)
   (add-period! (yesterday) (hours 1) "dilly dallying")
   (clock-in! (time-ago (hours 2)) "started working")
@@ -111,9 +129,11 @@
 ; data definitions
 
 ; a Timesheet is a
-(struct timesheet [intervals periods clock-in] #:prefab)
+(struct timesheet [intervals periods payments rate clock-in] #:prefab)
 ; intervals is a (listof Interval)
 ; periods is a (listof Period)
+; payments is a (listof Payment)
+; rate is a Real representing $/hr for work.
 ; clockin is a (or/c #f Event)
 
 ; an Interval is a
@@ -121,43 +141,51 @@
 ; start and end are Events
 
 ; an Event is a
-(struct event [date description] #:prefab)
+(struct event [date description rate] #:prefab)
 ; date is a date?
 ; description is a (or/c #f string?)
+; rate is a Real in $/hr
 
 ; a Period is a
-(struct period [date duration description] #:prefab)
+(struct period [date duration description rate] #:prefab)
 ; date is a date?. the time is not necessarily accurate
 ; duration is an integer representing seconds
 ; description is a (or/c #f string?)
+; rate is a Real in $/hr
+
+; A Payment is a
+(struct payment [date description amount] #:prefab)
+; date is a date? the time is not necessarily accurate
+; description is a (or/c #f string?)
+; amount is a Real in $
 
 ; timesheet operations
 
-(define empty-timesheet (timesheet (list) (list) #f))
+(define empty-timesheet (timesheet (list) (list) (list) 0 #f))
 
 ; Timesheet date? (or/c #f string?) -> Timesheet
-(define (timesheet-do-clock-in sheet dat [description #f])
+(define (timesheet-do-clock-in sheet dat [description #f] #:rate [rate #f])
   (when (timesheet-clock-in sheet)
     (raise-user-error "already clocked in"))
-  (struct-copy timesheet sheet [clock-in (event dat description)]))
+  (struct-copy timesheet sheet [clock-in (event dat description (or rate (timesheet-rate sheet)))]))
 
 (module+ test
   (test-case "clock-in"
     (define dat (current-date))
     (check-equal? (timesheet-do-clock-in empty-timesheet dat "working")
-                  (timesheet (list) (list) (event dat "working")))
+                  (timesheet (list) (list) (list) 0 (event dat "working" 0)))
     (check-exn
      #rx"already clocked in"
      (lambda ()
-       (timesheet-do-clock-in (timesheet (list) (list) (event dat #f)) dat)))))
+       (timesheet-do-clock-in (timesheet (list) (list) (list) 0 (event dat #f 0)) dat)))))
 
 ; Timesheet date? (or/c #f string?) -> Timesheet
-(define (timesheet-do-clock-out sheet dat [description #f])
+(define (timesheet-do-clock-out sheet dat [description #f] #:rate [rate #f])
   (unless (timesheet-clock-in sheet)
     (raise-user-error "not clocked in"))
   (struct-copy timesheet sheet
                [clock-in #f]
-               [intervals (cons (interval (timesheet-clock-in sheet) (event dat description))
+               [intervals (cons (interval (timesheet-clock-in sheet) (event dat description (or rate (timesheet-rate sheet))))
                                 (timesheet-intervals sheet))]))
 
 (module+ test
@@ -166,14 +194,14 @@
     (define dat2 (current-date))
     (define clocked-in (timesheet-do-clock-in empty-timesheet dat1 "working"))
     (define clocked-out (timesheet-do-clock-out clocked-in dat2))
-    (check-equal? (timesheet-intervals clocked-out) (list (interval (event dat1 "working") (event dat2 #f))))
+    (check-equal? (timesheet-intervals clocked-out) (list (interval (event dat1 "working" 0) (event dat2 #f 0))))
     (check-equal? (timesheet-clock-in clocked-out) #f)))
 
 ; Timesheet date? natural? (or/c #f string/) -> Timesheet
 ; duration in seconds
-(define (timesheet-add-period sheet dat duration [description #f])
+(define (timesheet-add-period sheet dat duration [description #f] #:rate [rate #f])
   (struct-copy timesheet sheet
-               [periods (cons (period dat duration description)
+               [periods (cons (period dat duration description (or rate (timesheet-rate sheet)))
                               (timesheet-periods sheet))]))
 
 (define SECONDS_PER_HOUR (* 60 60))
@@ -187,7 +215,7 @@
 (define (timesheet-total-hours sheet)
   (/ (+ (for/sum ([int (timesheet-intervals sheet)])
           (match int
-            [(interval (event start _) (event end _))
+            [(interval (event start _ _) (event end _ _))
              (- (date->seconds end)
                 (date->seconds start))]))
         (for/sum ([prd (timesheet-periods sheet)])
@@ -200,7 +228,7 @@
 ; erases clockin.
 (define (timesheet-select-between sheet start end)
   (match sheet
-    [(timesheet ints prds _)
+    [(timesheet ints prds payments rate _)
      (define ints^
        (filter (lambda (int)
                  (and (date<=? start (event-date (interval-start int)))
@@ -211,7 +239,12 @@
                  (and (date<=? start (period-date prd))
                       (date<=? (period-date prd) end)))
                prds))
-     (timesheet ints prds #f)]))
+     (define payments^
+       (filter (lambda (pmt)
+                 (and (date<=? start (payment-date pmt))
+                      (date<=? (payment-date pmt) end)))
+               payments))
+     (timesheet ints^ prds^ payments^ rate #f)]))
 
 ; date? date? -> boolean?
 (define (date<=? d1 d2)
@@ -270,17 +303,17 @@
 
 ; parameterized operations
 
-(define (clock-in! dat [description #f])
+(define (clock-in! dat [description #f] #:rate [rate #f])
   (assert-current-timesheet!)
-  (current-timesheet (timesheet-do-clock-in (current-timesheet) dat description)))
+  (current-timesheet (timesheet-do-clock-in (current-timesheet) dat description #:rate rate)))
 
-(define (clock-out! dat [description #f])
+(define (clock-out! dat [description #f] #:rate [rate #f])
   (assert-current-timesheet!)
-  (current-timesheet (timesheet-do-clock-out (current-timesheet) dat description)))
+  (current-timesheet (timesheet-do-clock-out (current-timesheet) dat description #:rate rate)))
 
-(define (add-period! dat duration [description #f])
+(define (add-period! dat duration [description #f] #:rate [rate #f])
   (assert-current-timesheet!)
-  (current-timesheet (timesheet-add-period (current-timesheet) dat duration description)))
+  (current-timesheet (timesheet-add-period (current-timesheet) dat duration description #:rate rate)))
 
 (define (hours-between start end)
   (assert-current-timesheet!)
@@ -296,18 +329,21 @@
   `(timesheet
     (clock-in ,@(if (timesheet-clock-in (current-timesheet))
                     (match (timesheet-clock-in (current-timesheet))
-                      [(event dat desc)
-                       `(,(date->string dat #t) ,desc)])
+                      [(event dat desc rate)
+                       `(,(date->string dat #t) ,desc ,(rate->datum rate))])
                     '(#f)))
     (intervals
      ,@(for/list ([int (timesheet-intervals sheet)])
          (match int
-           [(interval (event start desc-start) (event end desc-end))
-            `(interval [start ,(date->string start #t) ,desc-start] [end ,(date->string end #t) ,desc-end])])))
+           [(interval (event start desc-start rate-start) (event end desc-end rate-end))
+            `(interval [start ,(date->string start #t) ,desc-start ,(rate->datum rate-start)] [end ,(date->string end #t) ,desc-end ,(rate->datum rate-end)])])))
     (periods
      ,@(for/list ([prd (timesheet-periods sheet)])
          (match prd
-           [(period dat duration desc)
-            `(period ,(date->string dat) ,(round-to-tenth (/ duration SECONDS_PER_HOUR)) ,desc)])))))
+           [(period dat duration desc rate)
+            `(period ,(date->string dat) ,(round-to-tenth (/ duration SECONDS_PER_HOUR)) ,desc ,(rate->datum rate))])))))
+
+(define (rate->datum rate)
+  (format "$~a/hr" rate))
 
 (define (round-to-tenth x) (/ (round (* 10 (exact->inexact x))) 10))
