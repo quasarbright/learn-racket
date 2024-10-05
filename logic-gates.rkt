@@ -1,5 +1,7 @@
 #lang racket
 
+; this lives in its own repo now, called rico-blaze
+
 ; little logic circuit DSL
 ; this file contains the runtime and design notes
 
@@ -256,14 +258,18 @@ ended up changing it a little. outputs immediately power inputs
 ; Step the circuit.
 ; Update each output according to its current inputs and logic gate procedure.
 ; Update each input according to the output(s) connected to it and their NEW values.
+; O(gates * wires) time. hashes might get you down to O(gates + wires), which is effectively O(wires) since gates ~~ k*wires.
 (define (circuit-step! circ)
   (define powered-outputs
+    ; O(gates) time
     (for/seteq ([gat (circuit-gates circ)]
                 #:when (circuit-gate-run circ gat))
       (gate-output gat)))
   (define powered-inputs
+    ; O(wires * powered-outputs) time
     (for/fold ([powered-inputs (seteq)])
               ([out powered-outputs])
+      ; O(wires) time (can be improved to O(output-children) with hashes)
       (define ins (for/seteq ([in (circuit-output-children circ out)]) in))
       (set-union powered-inputs ins)))
   (define new-powereds (set-union powered-outputs powered-inputs))
@@ -276,12 +282,14 @@ ended up changing it a little. outputs immediately power inputs
 ; Circuit Gate -> Boolean
 ; Should the gate's output be powered based on its inputs?
 ; Runs the gate's procedure with the current values of its input ports.
+; time complexity is O(inputs)
 (define (circuit-gate-run circ gat)
   (match-define (gate _ inputs _ proc) gat)
   (apply proc (for/list ([in inputs]) (circuit-port-powered? circ in))))
 
 ; Circuit OutputPort -> (Listof InputPort)
 ; Finds the inputs that the given output is directly connected to through wires
+; O(wires) time
 (define (circuit-output-children circ out)
   (for/list ([wir (circuit-wires circ)]
              #:when (eq? out (wire-output wir)))

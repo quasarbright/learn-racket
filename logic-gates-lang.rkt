@@ -1,5 +1,7 @@
 #lang racket
 
+; this lives in its own repo now, called rico-blaze
+
 ; frontend language for logic circuit DSL
 
 (module+ test (require rackunit))

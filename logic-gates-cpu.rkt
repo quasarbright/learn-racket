@@ -1,5 +1,7 @@
 #lang racket
 
+; this lives in its own repo now, called rico-blaze
+
 ; usage of logic language to create cpu components
 ; uses designs from https://www.youtube.com/watch?v=I0-izyq6q5s&t=850s
 
