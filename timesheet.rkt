@@ -4,6 +4,7 @@
 
 (module+ test (require rackunit))
 (provide
+ ; TODO contracts and docs
  ; timesheet interface
 
  ; files
@@ -20,26 +21,41 @@
 
  ; timesheet operations
 
- ; -> void
- ; create an empty timesheet
+ ; [#:rate real?] -> void
+ ; create an empty timesheet with an optional hourly rate (defaults to timesheet hourly rate)
  create-timesheet!
- ; date? [string?] -> void
- ; clock in at that time, with optional description
+ ; date? [string?] [#:rate real?] -> void
+ ; clock in at that time, with optional description and hourly rate (defaults to timesheet hourly rate)
  clock-in!
- ; date? [string?] -> void
- ; clock out at that time, with optional description
+ ; date? [string?] [#:rate real?] -> void
+ ; clock out at that time, with optional description and hourly rate (defaults to timesheet hourly rate)
  clock-out!
- ; date? natural? [string?] -> void
- ; add a duration of work with no start or end, with optional description.
+ ; date? natural? [string?] [#:rate real?] -> void
+ ; add a duration of work with no start or end, with optional description and hourly rate (defaults to timesheet hourly rate).
  ; recommended to use date utilities like (today) which clear the date's time.
- ; time is in seconds. recmmended to use time utilities like (hours 2)
+ ; time is in seconds. recommended to use time utilities like (hours 2)
  add-period!
+ ; real? -> void
+ ; set the current hourly rate for work
+ set-hourly-rate!
+ ; date? real? [string?]
+ ; add a payment in dollars with optional description.
+ add-payment!
  ; date? date? -> number?
  ; how many hours in between the two dates
  hours-between
  ; -> number?
  ; total hours in the whole timesheet
  total-hours
+ ; -> number?
+ ; the amount of hours of work you haven't been paid for yet
+ unpaid-hours
+ ; -> number?
+ ; the amount of money you are owed for your work
+ money-owed
+ ; -> number?
+ ; the total amount of money you've been paid. does not include money owed but not yet paid.
+ money-earned
  ; -> void
  print-timesheet
 
@@ -103,6 +119,7 @@
 ;   - UI:
 ;     - (unpaid-hours) how many hours of work you haven't been paid for
 ;     - (money-owed) returns how much money you are owed
+;     - (total-paid) how much money you've been paid total
 ;     - (hourly-rate) returns current hourly rate
 ;     - (set-hourly-rate! rate) obvious
 ;     - (add-payment! amount [description])
@@ -113,15 +130,19 @@
 ;      - print a warning?
 ;      - don't worry about it until you run into that use-case. for now, default to zero without warning.
 ;    - if start and end have different rates, use the end's rate.
+; - help/docs. help can take you to docs like racket builtin help
+; - undo/redo. warn on something like adding a period with 2 seconds bc they meant hours.
 
 ; can only have one clock-in at a time
 
 (module+ main
-  (create-timesheet!)
+  (create-timesheet! #:rate 40)
   (add-period! (yesterday) (hours 1) "dilly dallying")
   (clock-in! (time-ago (hours 2)) "started working")
   (clock-out! (now) "done working")
-  (hours-between (yesterday) (now))
+  (money-owed)
+  (add-payment! (today) 50)
+  (money-owed)
   (save-timesheet! "research.hours")
   (load-timesheet! "research.hours")
   (print-timesheet))
@@ -213,14 +234,14 @@
 ; Timesheet -> natural?
 ; excludes time related to clockin
 (define (timesheet-total-hours sheet)
-  (/ (+ (for/sum ([int (timesheet-intervals sheet)])
-          (match int
-            [(interval (event start _ _) (event end _ _))
-             (- (date->seconds end)
-                (date->seconds start))]))
-        (for/sum ([prd (timesheet-periods sheet)])
-          (period-duration prd)))
-     SECONDS_PER_HOUR))
+  (seconds->hours
+   (+ (for/sum ([int (timesheet-intervals sheet)])
+        (match int
+          [(interval (event start _ _) (event end _ _))
+           (- (date->seconds end)
+              (date->seconds start))]))
+      (for/sum ([prd (timesheet-periods sheet)])
+        (period-duration prd)))))
 
 ; Timesheet date? date? -> Timesheet
 ; selects intervals and periods that are fully contained between start and end.
@@ -251,6 +272,95 @@
   (<= (date->seconds d1)
       (date->seconds d2)))
 
+(define (timesheet-unpaid-hours sheet)
+  (/ (timesheet-money-owed sheet) (timesheet-rate sheet)))
+
+(module+ test
+  (let ([now (now)])
+    (check-equal? (timesheet-unpaid-hours (timesheet (list (interval (event now "" 10) (event (+/date now (hours 2)) "" 40)))
+                                                     (list (period (today) (hours 3) "" 50))
+                                                     ; should be ignored
+                                                     (list (payment (yesterday) "" 50) (payment (today) "" 100))
+                                                     ; should be ignored
+                                                     23
+                                                     ; should be ignored
+                                                     (event (today) "" 70)))
+                  (/ (- (+ (* 2 40)
+                           (* 3 50))
+                        (+ 100 50))
+                     23))))
+
+(define (timesheet-money-owed sheet)
+  (- (timesheet-total-work-value sheet) (timesheet-money-earned sheet)))
+
+(module+ test
+  (let ([now (now)])
+    (check-equal? (timesheet-money-owed (timesheet (list (interval (event now "" 10) (event (+/date now (hours 2)) "" 40)))
+                                                   (list (period (today) (hours 3) "" 50))
+                                                   ; should be ignored
+                                                   (list (payment (yesterday) "" 50) (payment (today) "" 100))
+                                                   ; should be ignored
+                                                   60
+                                                   ; should be ignored
+                                                   (event (today) "" 70)))
+                  (- (+ (* 2 40)
+                        (* 3 50))
+                     (+ 100 50)))))
+
+; sum of all work * hours. ignores payment.
+(define (timesheet-total-work-value sheet)
+  (+ (for/sum ([int (timesheet-intervals sheet)])
+       ; use the end event's rate since it's probably more up to date if different
+       (define $/hr (event-rate (interval-end int)))
+       (define hours (seconds->hours (interval-duration int)))
+       (* $/hr hours))
+     (for/sum ([prd (timesheet-periods sheet)])
+       (define $/hr (period-rate prd))
+       (define hours (seconds->hours (period-duration prd)))
+       (* $/hr hours))))
+
+(module+ test
+  (let ([now (now)])
+    (check-equal? (timesheet-total-work-value (timesheet (list (interval (event now "" 10) (event (+/date now (hours 2)) "" 40)))
+                                                     (list (period (today) (hours 3) "" 50))
+                                                     ; should be ignored
+                                                     (list (payment (today) "" 1000))
+                                                     ; should be ignored
+                                                     60
+                                                     ; should be ignored
+                                                     (event (today) "" 70)))
+                  (+ (* 2 40)
+                     (* 3 50)))))
+
+(define (timesheet-money-earned sheet)
+  (for/sum ([pmt (timesheet-payments sheet)])
+    (payment-amount pmt)))
+
+(module+ test
+  (check-equal? (timesheet-money-earned (timesheet (list) (list) (list (payment (now) "" 20) (payment (now) "" 30)) 30 #f))
+                50))
+
+(define (seconds->hours seconds) (/ seconds SECONDS_PER_HOUR))
+
+(module+ test
+  (check-equal? (seconds->hours 3600) 1)
+  (check-equal? (seconds->hours 7200) 2))
+
+; in seconds
+(define (interval-duration int)
+  (- (date->seconds (event-date (interval-end int)))
+     (date->seconds (event-date (interval-start int)))))
+
+(module+ test
+  (check-equal? (interval-duration (interval (event (seconds->date 1000) "" 0) (event (seconds->date 3000) "" 0)))
+                2000))
+
+(define (timesheet-set-hourly-rate sheet rate)
+  (struct-copy timesheet sheet [rate rate]))
+
+(define (timesheet-add-payment sheet dat amt [desc #f])
+  (struct-copy timesheet sheet [payments (cons (payment dat desc amt) (timesheet-payments sheet))]))
+
 ; date utilities
 
 (define (now) (current-date))
@@ -279,8 +389,13 @@
 (define (assert-current-timesheet!)
   (unless (current-timesheet)
     (raise-user-error "no timesheet active!")))
-(define (create-timesheet!)
-  (current-timesheet empty-timesheet))
+(define (create-timesheet! #:rate [rate #f])
+  (unless rate
+    (warn "created a timesheet without an hourly rate. assuming this work will be unpaid. otherwise, use set-hourly-rate!"))
+  (current-timesheet (timesheet-set-hourly-rate empty-timesheet (or rate 0))))
+
+(define (warn str)
+  (displayln str (current-error-port)))
 
 ; files
 
@@ -315,23 +430,45 @@
   (assert-current-timesheet!)
   (current-timesheet (timesheet-add-period (current-timesheet) dat duration description #:rate rate)))
 
+(define (set-hourly-rate! rate)
+  (assert-current-timesheet!)
+  (current-timesheet (timesheet-set-hourly-rate (current-timesheet) rate)))
+
+(define (add-payment! dat amt [desc #f])
+  (assert-current-timesheet!)
+  (current-timesheet (timesheet-add-payment (current-timesheet) dat amt desc)))
+
 (define (hours-between start end)
   (assert-current-timesheet!)
   (round-to-tenth (timesheet-hours-between (current-timesheet) start end)))
 
 (define (total-hours)
+  (assert-current-timesheet!)
   (timesheet-total-hours (current-timesheet)))
+
+(define (unpaid-hours)
+  (assert-current-timesheet!)
+  (timesheet-unpaid-hours (current-timesheet)))
+
+(define (money-owed)
+  (assert-current-timesheet!)
+  (timesheet-money-owed (current-timesheet)))
+
+(define (money-earned)
+  (assert-current-timesheet!)
+  (timesheet-money-earned (current-timesheet)))
 
 (define (print-timesheet)
   (pretty-print (timesheet->datum (current-timesheet))))
 
 (define (timesheet->datum sheet)
   `(timesheet
-    (clock-in ,@(if (timesheet-clock-in (current-timesheet))
-                    (match (timesheet-clock-in (current-timesheet))
+    (clock-in ,@(if (timesheet-clock-in sheet)
+                    (match (timesheet-clock-in sheet)
                       [(event dat desc rate)
                        `(,(date->string dat #t) ,desc ,(rate->datum rate))])
                     '(#f)))
+    (hourly-rate ,(rate->datum (timesheet-rate sheet)))
     (intervals
      ,@(for/list ([int (timesheet-intervals sheet)])
          (match int
@@ -341,7 +478,12 @@
      ,@(for/list ([prd (timesheet-periods sheet)])
          (match prd
            [(period dat duration desc rate)
-            `(period ,(date->string dat) ,(round-to-tenth (/ duration SECONDS_PER_HOUR)) ,desc ,(rate->datum rate))])))))
+            `(period ,(date->string dat) ,(round-to-tenth (seconds->hours duration)) ,desc ,(rate->datum rate))])))
+    (payments
+     ,@(for/list ([pmt (timesheet-payments sheet)])
+         (match pmt
+           [(payment dat desc amount)
+            `(payment ,(date->string dat) ,desc amount)])))))
 
 (define (rate->datum rate)
   (format "$~a/hr" rate))
