@@ -1,6 +1,7 @@
 #lang racket
 
 ; A DSL for working with timesheets.
+; this has moved to its own repo called launder
 
 (module+ test (require rackunit))
 (provide
