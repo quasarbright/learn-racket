@@ -2,6 +2,7 @@
 
 ;; A debugger using continuations.
 ;; I later found out that this exists: https://github.com/AlexKnauth/debug/blob/master/debug/repl.rkt
+;; Limitations: You can't give the debugger repl access to macros, only variables bound to values.
 ;; TODO command to print context lines
 
 (module+ test (require rackunit))
