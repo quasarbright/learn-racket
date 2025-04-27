@@ -3,12 +3,14 @@
 ; a little type checker/interpreter for a dependently typed language
 ; initially taken from https://www.andres-loeh.de/LambdaPi/LambdaPi.pdf
 ; but expanded on in several ways
+; booleans (with dependent if)
+; "jit type checking" (not sure what the actual name for this is)
 
 ; TODO add naturals
 ; TODO add vectors
 ; TODO add staging so there is an environment for evaluations during type checking
 #;
-(let-for-type ([x e])
+(let-for-type ([x (lambda ...)])
   (define y : (x Number)
     ...))
 ;; TODO even better, support that with just let. there'd be no separation between checking-time and evaluation-time
@@ -404,4 +406,69 @@ eval(boolElim m e-cnd e-thn e-els) = boolElim m n v-thn v-els
     eval(e-els) = v-els
 ;; this is weird because we evaluate both branches in the neutral case,
 ;; but ig it's no weirder than pre-evaluating function bodies
+|#
+
+#|
+just in time type checking
+(let ([T (lambda (t) ...)])
+  (: e (T Bool)))
+
+constraints:
+- the values of variables that are in scope must be available during type checking
+- expressions should evaluate at most once. i.e. evaluations in type checking shouldn't happen again
+during evaluation
+
+you need to interleave type checking and evaluation.
+ideally, it would be possible to type check one isolated piece of code,
+then evaluate it, then type check the next, and so on.
+But this is all one expression.
+
+design:
+every sub-expression gets inferred before evaluated
+
+inferAndEval : Expr Ctx Env -> (Values Type Value)
+checkAndEval : Expr Type Ctx Env -> Value
+
+inferAndEval (let ([x rhs]) body) ctx env =
+  t-rhs, v-rhs = inferAndEval rhs ctx env
+  t-body, v-body = inferAndEval body (ctx, x : t-rhs) (env, x = v-rhs)
+  return t-body, v-body
+inferAndEval (forall (: x A) B) ctx env =
+  v-A = checkAndEval A * ctx env
+  ;; we set x = x when there is no value available to avoid shadowing weirdness between parallel ctx,env
+  ;; duplicate eval, want just checking but checking will eval subexpressions
+  _ = checkAndEval B * (ctx, x : v-A) (env, x = x)
+  return *, (pi v-A (lambda (v-x) ))
+
+checkAndEval (lambda (x) e) (pi t-x x->t-ret) ctx env =
+  ;; want just check, but checking will eval subexpressions
+  _ = checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))
+  ;; duplicate check, want just eval, but we can't leverage previous subexpression evaluation
+  ;; because we need to evaluate against the environment for closures
+  return (lambda (x) (checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))))
+
+to do just inference, you could have
+infer : Expr Ctx Env -> Type
+infer (let ([x rhs]) body) ctx env =
+  ;; we need to eval rhs to infer body
+  t-rhs, v-rhs = inferAndEval rhs ctx env
+  ;; just infer body
+  t-body = infer body (ctx, x : t-rhs) (env, x = v-rhs)
+  return t-body
+
+to avoid redundant code
+infer : Expr Ctx Env -> (Values Type (Lazy Value))
+infer! : Expr Ctx Env -> (Values Type Value)
+infer! e ctx env =
+  t, p = infer e ctx env
+  return t, (force p)
+
+that might not make sense
+you might be able to leverage neutrals and quoting to minimize the impact of re-evaluation
+maybe doing expr -> expr reduction with substitution could save you?
+this laziness is going to be a pain
+maybe going full lazy on types and expressions will just work exactly the way you want?
+like just forcing the inferred type will do all the necessary type checking and sub-evaluation and nothing more.
+I think that could work. do a small prototype first.
+
 |#
