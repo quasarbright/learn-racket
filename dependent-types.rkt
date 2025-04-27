@@ -17,6 +17,8 @@
 ;; Just-in-time type checking lol
 ;; you'll need types as values for (let ([x Bool]) (: #t x))
 ;; TODO more convenient syntax for lambda annotation
+;; TODO remove boolElim? pretty sure you could just do the same thing with a lambda and if
+;; TODO recursion with termination checking
 
 ;; surface syntax
 
@@ -285,6 +287,8 @@
   (check-equal? (normalize '(lambda (x) x)) '(lambda (_.0) _.0))
   (check-equal? (eval '((lambda (x) x) y) empty-env) 'y)
   (check-equal? (eval '(let ([x y]) x) empty-env) 'y)
+  (check-equal? (normalize '(let ([x #t]) (lambda (x) x)))
+                '(lambda (_.0) _.0))
   (check-equal? (infer #t ctx) 'Bool)
   (check-equal? (check #t 'Bool ctx) (void))
   (check-equal? (check '(lambda (x) x) (pi 'Bool (const 'Bool)) ctx) (void))
@@ -413,11 +417,15 @@ just in time type checking
 (let ([T (lambda (t) ...)])
   (: e (T Bool)))
 
-constraints:
-- the values of variables that are in scope must be available during type checking
+constraints/goals:
+- the VALUES of variables that are in scope must be available during type checking.
 - expressions should evaluate at most once. i.e. evaluations in type checking shouldn't happen again
-during evaluation
-- the type of an expression should be inferred/checked at most once
+during evaluation.
+- the type of an expression should be inferred/checked at most once.
+- a runtime type error should be impossible,
+but evaluation of runtime code before a type error is discovered is acceptable.
+- however, ideally, we'd only evaluate just as much as is necessary for typing.
+- same-value should give few false negatives (requires neutrals and good normalization)
 
 you need to interleave type checking and evaluation.
 ideally, it would be possible to type check one isolated piece of code,
@@ -427,81 +435,137 @@ But this is all one expression.
 design:
 every sub-expression gets inferred before evaluated
 
-inferAndEval : Expr Ctx Env -> (Values Type Value)
-checkAndEval : Expr Type Ctx Env -> Value
+infer : Expr Ctx Env -> (Values Type Value)
+check : Expr Type Ctx Env -> Value
 
-inferAndEval (let ([x rhs]) body) ctx env =
-  t-rhs, v-rhs = inferAndEval rhs ctx env
-  t-body, v-body = inferAndEval body (ctx, x : t-rhs) (env, x = v-rhs)
-  return t-body, v-body
-inferAndEval (forall (: x A) B) ctx env =
-  v-A = checkAndEval A * ctx env
-  ;; we set x = x when there is no value available to avoid shadowing weirdness between parallel ctx,env
-  _ = checkAndEval B * (ctx, x : v-A) (env, x = x)
-  ;; duplicate eval, want just checking but checking will eval subexpressions
-  return *, (pi v-A (lambda (v-x) (eval B * (ctx, x : v-A) (env, x = v-x))))
-
-checkAndEval (lambda (x) e) (pi t-x x->t-ret) ctx env =
-  ;; want just check, but checking will eval subexpressions
-  _ = checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))
-  ;; duplicate check, want just eval, but we can't leverage previous subexpression evaluation
-  ;; because we need to evaluate against the environment for closures
-  return (lambda (x) (checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))))
-
-to do just inference, you could have
-infer : Expr Ctx Env -> Type
+infer x ctx env =
+  error if x not in ctx
+  return ctx[x], env[x]
 infer (let ([x rhs]) body) ctx env =
-  ;; we need to eval rhs to infer body
-  t-rhs, v-rhs = inferAndEval rhs ctx env
-  ;; just infer body
-  t-body = infer body (ctx, x : t-rhs) (env, x = v-rhs)
-  return t-body
-
-to avoid redundant code
-infer : Expr Ctx Env -> (Values Type (Lazy Value))
-infer! : Expr Ctx Env -> (Values Type Value)
-infer! e ctx env =
-  t, p = infer e ctx env
-  return t, (force p)
-
-that might not make sense
-you might be able to leverage neutrals and quoting to minimize the impact of re-evaluation
-maybe doing expr -> expr reduction with substitution could save you?
-this laziness is going to be a pain
-maybe going full lazy on types and expressions will just work exactly the way you want?
-like just forcing the inferred type will do all the necessary type checking and sub-evaluation and nothing more.
-I think that could work. do a small prototype first.
-
-;; we don't want (Promise (values Type Value)) because we want to force separately
-infer : Expr Ctx Env -> (values (Promise Type) (Promise Value))
-inferAndEval (let ([x rhs]) body) ctx env =
-  t-rhs-p, v-rhs-p = inferAndEval rhs ctx env
-  ;; these forces mean we'll always type and eval rhs. problem? should be fine bc we'll never want neither.
-  ;; avoidable with an extra level of delay
-  ;; TODO should ctx and env have promises instead of direct values? I think so, because you might not end up using
-  ;; them. But then you might miss out on unforced type errors. maybe just value promises?
-  return inferAndEval body (ctx, x : (force t-rhs-p)) (env, x = (force v-rhs-p))
-inferAndEval (forall (: x A) B) ctx env =
-  v-A-p = checkAndEval A * ctx env
+  t-rhs, v-rhs = infer rhs ctx env
+  t-body, v-body = infer body (ctx, x : t-rhs) (env, x = v-rhs)
+  return t-body, v-body
+infer (forall (: x A) B) ctx env =
+  v-A = check A * ctx env
   ;; we set x = x when there is no value available to avoid shadowing weirdness between parallel ctx,env
-  ;; need void-p to delay the checking as opposed to eval
-  void-p, Bx-p = checkAndEval B * (ctx, x : v-A) (env, x = x)
-  ;; we never force Bx-p, no duplicate eval
-  return (delay (force void-p) *), (delay (pi (force v-A-p) (lambda (v-x) (eval B * (ctx, x : (force v-A-p)) (env, x = v-x)))))
+  ;; unnecessary eval, want just check
+  _ = check B * (ctx, x : v-A) (env, x = x)
+  ;; unnecessary check, want just eval
+  ;; very redundant, will happen every instantiation
+  return *, (pi v-A (lambda (v-x) (check B * (ctx, x : v-A) (env, x = v-x))))
+infer (e1 e2) ctx env =
+  ;; really shouldn't eval e1 until e2 is checked
+  (pi t2 v2->t), v1 = infer e1 ctx env
+  v2 = check e2 t2 ctx env
+  t = (v2->t v2)
+  return t, (v1 v2)
+infer (: e p) ctx env =
+  t = check p * ctx env
+  v = check e t ctx env
+  return t, v
 
-;; (Promise Void) to allow delaying of checking action
-checkAndEval : Expr Type Ctx Env -> (values (Promise Void) (Promise Value))
-checkAndEval (lambda (x) e) (pi t-x x->t-ret) ctx env =
-  ;; want just check, but checking will eval subexpressions
-  void-p, v-p = checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))
-  ;; ignore v-p to avoid body re-evaluation
-  ;; because we need to evaluate against the environment for closures
-  return void-p, (lambda (x)
-                   (define-values (void-p v-p) (checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))))
-                   ;; ignore void-p to avoid duplicate check
-                   (force v-p))
+check (lambda (x) e) (pi t-x x->t-ret) ctx env =
+  ;; unnecessary eval, want just check
+  ;; supply neutral x to x->t-ret and env
+  _ = check e (x->t-ret x) (ctx, x : t-x) (env, x = x)
+  ;; unnecessary check, want just eval
+  ;; very redundant, will happen every application
+  return (lambda (v) (check e (x->t-ret v) (ctx, x : t-x) (env, x = v)))
+check e t ctx env =
+  t', v = infer e ctx env
+  assertEquals t t'
+  return v
 
-should work? messy though. should try to simplify.
-can't just do (Promise (values Type Value)) bc internally, you need to avoid forcing one of them
-Maybe just use #lang lazy lol. Nvm, it is unusable.
+Thinking about if neutrals and Expr->Expr reduction can save the day:
+instead of lambdas and foralls evaluating to functions, they just reduce to expressions
+(let ([x 1])
+  (lambda (y)
+    (+ x y)))
+~>
+(lambda (y) (+ 1 y))
+But this causes duplicate evals
+(lambda (n)
+  (let ([y (+ n n)])
+    (* y y)))
+~>
+(lambda (n)
+  (* (+ n n) (+ n n)))
+
+the interpreter does not have this problem right now.
+we only get this problem if we reduce the body of a lambda/forall before application, and then apply later
+
+ok, so typing requires evaluation, but not vice versa. We can use promises to minimize value evaluation,
+and just have a should-type? flag to disable typing
+
+everywhere you see promise, a non-delayed value is ok too
+
+Ctx = Hash Symbol Type ; NOTE types are always forced since typing is strict
+Env = Hash Symbol (Promise Value)
+parameter should-type? = #t
+infer : Expr Ctx Env -> (values Type (Promise Value))
+check : Expr Type Ctx Env -> (Promise Value)
+eval : Expr Env -> Value
+
+TODO should-type?
+infer x ctx env =
+  assert x in ctx
+  t = ctx[x]
+  return t, env[x] ; remember env[x] is a promise/value so no need to delay
+infer (let ([x rhs]) body) ctx env =
+  t-rhs, vp-rhs = infer rhs ctx env
+  t-body, vp-body = infer body (ctx, x : t-rhs) (env, x = vp-rhs)
+  return t-body, vp-body
+infer (forall (: x A) B) ctx env =
+  tp-x = check A * ctx env
+  t-x = force tp-x
+  ;; supply neutral x
+  _ = check B * (ctx, x : t-x) (env, x = x)
+  ;; no need to delay value
+  return *, (pi t-x (lambda (v) eval B (env, x = v)))
+infer (e1 e2) ctx env =
+  (pi t2 v2->t), v1p = infer e1 ctx env
+  v2p = check e2 t2 ctx env
+  ;; unexpected but ok: need to force operand evaluation to infer type of application
+  v2 = force v2p
+  t = (v2->t v2)
+  ;; no need for lazy.
+  ;; this is the only delay and it produces a value, not another promise.
+  return t, (delay ((force v1p) v2))
+infer (: e p) ctx env =
+  tp = check p * ctx env
+  t = force tp
+  vp = check e t ctx env
+  return vp
+
+check (lambda (x) e) (pi t-x x->t-ret) ctx env =
+  ;; supply neutral x
+  _ = check e (x->t-ret x) (ctx, x : t-x) (env, x = x)
+  return (lambda (v) eval e (env, x = v))
+check e t ctx env =
+  t', vp = infer e ctx env
+  assert t == t'
+  return vp
+
+eval (lambda (x) e) env = without typing: check e #f #f env
+eval e env =
+  without typing:
+    _,vp = infer e #f env
+    return (force vp)
+
+we only force the evaluation of types and application arguments.
+however, the application force may end up forcing lots of other runtime evaluations.
+also, a consequence of this is that function bodies will evaluate a little with neutrals, which is not ideal.
+
+an alternative is to evaluate it against the empty environment and then rely on neutrals,
+but that leads to re-evaluations to an extent.
+another option is to detect when the return type does not depend on the argument value,
+and skip the initial evaluation.
+
+Lean evaluates the argument:
+nVec : (n : Nat) → Vector Unit n
+#check (nVec (fib 4) : Vector Unit 5) -- succeeds
+But it tries not to evaluate it
+#check (nVec (fib 1000) : Vector Unit 1) -- fails with maximum recursion error
+#check (nVec (fib 1000) : Vector Unit (fib 1000)) -- succeeds without evaluating anything
+#check (nVec (fib 1000) : Vector Unit (fib (1000 + 0))) -- succeeds via symbolic simplification
 |#
