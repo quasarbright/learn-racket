@@ -417,6 +417,7 @@ constraints:
 - the values of variables that are in scope must be available during type checking
 - expressions should evaluate at most once. i.e. evaluations in type checking shouldn't happen again
 during evaluation
+- the type of an expression should be inferred/checked at most once
 
 you need to interleave type checking and evaluation.
 ideally, it would be possible to type check one isolated piece of code,
@@ -436,9 +437,9 @@ inferAndEval (let ([x rhs]) body) ctx env =
 inferAndEval (forall (: x A) B) ctx env =
   v-A = checkAndEval A * ctx env
   ;; we set x = x when there is no value available to avoid shadowing weirdness between parallel ctx,env
-  ;; duplicate eval, want just checking but checking will eval subexpressions
   _ = checkAndEval B * (ctx, x : v-A) (env, x = x)
-  return *, (pi v-A (lambda (v-x) ))
+  ;; duplicate eval, want just checking but checking will eval subexpressions
+  return *, (pi v-A (lambda (v-x) (eval B * (ctx, x : v-A) (env, x = v-x))))
 
 checkAndEval (lambda (x) e) (pi t-x x->t-ret) ctx env =
   ;; want just check, but checking will eval subexpressions
@@ -471,4 +472,36 @@ maybe going full lazy on types and expressions will just work exactly the way yo
 like just forcing the inferred type will do all the necessary type checking and sub-evaluation and nothing more.
 I think that could work. do a small prototype first.
 
+;; we don't want (Promise (values Type Value)) because we want to force separately
+infer : Expr Ctx Env -> (values (Promise Type) (Promise Value))
+inferAndEval (let ([x rhs]) body) ctx env =
+  t-rhs-p, v-rhs-p = inferAndEval rhs ctx env
+  ;; these forces mean we'll always type and eval rhs. problem? should be fine bc we'll never want neither.
+  ;; avoidable with an extra level of delay
+  ;; TODO should ctx and env have promises instead of direct values? I think so, because you might not end up using
+  ;; them. But then you might miss out on unforced type errors. maybe just value promises?
+  return inferAndEval body (ctx, x : (force t-rhs-p)) (env, x = (force v-rhs-p))
+inferAndEval (forall (: x A) B) ctx env =
+  v-A-p = checkAndEval A * ctx env
+  ;; we set x = x when there is no value available to avoid shadowing weirdness between parallel ctx,env
+  ;; need void-p to delay the checking as opposed to eval
+  void-p, Bx-p = checkAndEval B * (ctx, x : v-A) (env, x = x)
+  ;; we never force Bx-p, no duplicate eval
+  return (delay (force void-p) *), (delay (pi (force v-A-p) (lambda (v-x) (eval B * (ctx, x : (force v-A-p)) (env, x = v-x)))))
+
+;; (Promise Void) to allow delaying of checking action
+checkAndEval : Expr Type Ctx Env -> (values (Promise Void) (Promise Value))
+checkAndEval (lambda (x) e) (pi t-x x->t-ret) ctx env =
+  ;; want just check, but checking will eval subexpressions
+  void-p, v-p = checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))
+  ;; ignore v-p to avoid body re-evaluation
+  ;; because we need to evaluate against the environment for closures
+  return void-p, (lambda (x)
+                   (define-values (void-p v-p) (checkAndEval e (ctx, x : t-x) (env, x = (x->t-ret x))))
+                   ;; ignore void-p to avoid duplicate check
+                   (force v-p))
+
+should work? messy though. should try to simplify.
+can't just do (Promise (values Type Value)) bc internally, you need to avoid forcing one of them
+Maybe just use #lang lazy lol. Nvm, it is unusable.
 |#
