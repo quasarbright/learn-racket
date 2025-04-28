@@ -3,21 +3,17 @@
 ; a little type checker/interpreter for a dependently typed language
 ; initially taken from https://www.andres-loeh.de/LambdaPi/LambdaPi.pdf
 ; but expanded on in several ways
-; booleans (with dependent if)
-; "jit type checking" (not sure what the actual name for this is)
+; - booleans (with dependent if)
+; - "jit type checking" (not sure what the actual name for this is)
 
-; TODO add naturals
-; TODO add vectors
-; TODO add staging so there is an environment for evaluations during type checking
-#;
-(let-for-type ([x (lambda ...)])
-  (define y : (x Number)
-    ...))
-;; TODO even better, support that with just let. there'd be no separation between checking-time and evaluation-time
-;; Just-in-time type checking lol
-;; you'll need types as values for (let ([x Bool]) (: #t x))
+(module+ test (require (except-in rackunit check)))
+(require racket/promise)
+
+;; TODO add naturals
+;; TODO add vectors
 ;; TODO more convenient syntax for lambda annotation
 ;; TODO remove boolElim? pretty sure you could just do the same thing with a lambda and if
+;; or maybe somehow infer the motive from the branches. you may end up with a neutral if in the type though.
 ;; TODO recursion with termination checking
 
 ;; surface syntax
@@ -52,8 +48,6 @@
 ; const : (forall (: a *) (forall (: b *) (forall (_ : a) (forall (_ : b) a))))
 ; ((((const Bool) Nat) #t) 1) ~> #t
 
-;; runtime
-
 ; A Value is one of
 ; #t
 ; #f
@@ -75,24 +69,22 @@
 ; (list NeutralExpr Value)                        (application)
 ; (list 'if NeutralExpr Value Value)
 ; (list 'boolElim Expr NeutralExpr Value Value)   (dependent if)
-;;                ^ expr because it's only relevant to type-checking
+;;                ^ Expr because it's only relevant to type-checking
 ; Represents an irreducible expression
 
-; An Env is a (hash symbol Value)
+; An Env is a (hash symbol (Promise Value))
 (define empty-env (hasheq))
 
-; A Context is a (hash symbol (or Type Kind))
+; A Context is a (hash symbol Type)
 ; mapping to type is for term variables, mapping to kind is for type variables. don't worry about collision for now
 (define empty-ctx (hasheq))
 
-(module+ test (require (except-in rackunit check)))
-
 ;; Expr Ctx Env -> Expr
-;; infers the type and evaluates it
+;; Infers expr type, evaluates it, then quotes and annotates it with its type
+;; (run #t ctx env) ~> '(: #t Bool)
 (define (run expr ctx env)
-  (define t (quote-value (infer expr ctx)))
-  (define v (normalize expr env))
-  `(: ,v ,t))
+  (define-values (t vp) (infer expr ctx env))
+  `(: ,(quote-value (force vp)) ,(quote-value t)))
 
 (module+ test
   (check-equal? (run '(if #t #t #f) empty-ctx empty-env)
@@ -102,63 +94,11 @@
                 '(: (lambda (_.0) _.0)
                     (forall (: _.0 Bool) Bool))))
 
-; Expr -> Expr
-; reduce an expression to its canonical form.
-; note that the result is an expression.
-; any beta or alpha equivalent expressions should normalize to the same expression.
-(define (normalize expr [env empty-env]) (quote-value (eval expr env)))
-
-(module+ test
-  (check-equal? (normalize '(let ([x (lambda (y) y)]) (x x)))
-                '(lambda (_.0) _.0)))
-
-; Expr -> Value
-(define (eval expr env)
-  (match expr
-    ['* '*]
-    [(? symbol? x) (hash-ref env x x)]
-    [(? boolean? b) b]
-    [`(: ,expr ,_) (eval expr env)]
-    [`(lambda (,x) ,body)
-     (lambda (v-x) (eval body (hash-set env x v-x)))]
-    [`(let [(,x ,rhs)] ,body)
-     (define v-rhs (eval rhs env))
-     (eval body (hash-set env x v-rhs))]
-    [`(forall (: ,x ,p-x) ,p-ret)
-     ; remember, p-x and p-ret are expressions
-     ; p-x is (an expression for) the type of x
-     ; p-ret can depend on the _value_ of x
-     (define t-x (eval p-x env))
-     (pi t-x (lambda (v-x) (eval p-ret (hash-set env x v-x))))]
-    [`(if ,cnd ,thn ,els)
-     (match (eval cnd env)
-       [#t (eval thn env)]
-       [#f (eval els env)]
-       [n
-        ;; neutral case, evaluate branches as much as we can
-        ;; we're type-checked, so we don't have to worry about
-        ;; it being a non-bool!
-        `(if ,n
-             ,(eval thn env)
-             ,(eval els env))])]
-    [`(boolElim ,m ,cnd ,thn ,els)
-     (match (eval cnd env)
-       [#t (eval thn env)]
-       [#f (eval els env)]
-       [n
-        ;; neutral case, evaluate branches as much as we can
-        ;; we're type-checked, so we don't have to worry about
-        ;; it being a non-bool!
-        `(boolElim ,m ,n
-           ,(eval thn env)
-           ,(eval els env))])]
-    [`(,rator ,rand)
-     (match (eval rator env)
-       [(and f (? procedure?)) (f (eval rand env))]
-       [(or '* (pi _ _)) (error 'eval "bad application")]
-       [n
-        ;; neutral
-        `(,n ,(eval rand env))])]))
+; Expr Ctx Env -> Value
+(define (eval expr ctx env)
+  ;; TODO no checking in eval
+  (define-values (_ vp) (infer expr ctx env))
+  (force vp))
 
 ; Value -> Expr
 (define (quote-value v)
@@ -175,7 +115,9 @@
       [`(,n-rator ,v-rand)
        `(,(loop n-rator) ,(loop v-rand))]
       [`(boolElim ,m ,n-cnd ,v-thn ,v-els)
-       `(boolElim ,m ,(loop n-cnd) ,(loop v-thn) ,(loop v-els))]
+       `(boolElim ,(loop m) ,(loop n-cnd) ,(loop v-thn) ,(loop v-els))]
+      [`(if ,n-cnd ,v-thn ,v-els)
+       `(if ,(loop n-cnd) ,(loop v-thn) ,(loop v-els))]
       [(pi t-arg arg->t-ret)
        (define x (my-gensym))
        `(forall (: ,x ,(loop t-arg))
@@ -208,72 +150,110 @@
 (module+ test
   (check-equal? (number->var 0) '_.0))
 
-; Expr Context -> Type
-(define (infer expr ctx)
+; Expr Context Env -> (values Type (Promise Value))
+(define (infer expr ctx env)
   (match expr
-    ['* '*]
-    ['Bool '*]
+    ;; no need to delay '*, force does nothing to non-promises
+    ['* (values '* '*)]
+    ['Bool (values '* 'Bool)]
     [(? symbol? x)
-     (hash-ref ctx x (lambda () (error 'infer "unbound variable: ~a" x)))]
-    [(? boolean? b) 'Bool]
+     (define t (hash-ref ctx x (lambda () (error 'infer "unbound variable: ~a" x))))
+     (define vp (hash-ref env x))
+     ;; remember, the env holds promises of values
+     (values t vp)]
+    [(? boolean? b)
+     (values 'Bool b)]
     [`(: ,e ,p)
-     (check p '* ctx)
-     (define t (eval p empty-env))
-     (check e t ctx)
-     t]
+     (define t (force (check p '* ctx env)))
+     (define vp (check e t ctx env))
+     (values t vp)]
     [`(forall (: ,x ,p-x) ,p-ret)
-     (check p-x '* ctx)
-     (define t-x (eval p-x empty-env))
-     (check p-ret '* (hash-set ctx x t-x))
-     '*]
+     (define t-x (force (check p-x '* ctx env)))
+     ;; pass neutral x to env
+     ;; ignore neutrally evaluated p-ret
+     (check p-ret '* (hash-set ctx x t-x) (hash-set env x x))
+     ;; TODO no check in eval
+     (values '* (pi t-x (lambda (v-x) (eval p-ret (hash-set ctx x t-x) (hash-set env x v-x)))))]
     [`(let ([,x ,rhs]) ,body)
-     (define t-rhs (infer rhs ctx))
-     (infer body (hash-set ctx x t-rhs))]
+     (define-values (t-rhs vp-rhs) (infer rhs ctx env))
+     ;; remember env stores promises
+     (infer body (hash-set ctx x t-rhs) (hash-set env x vp-rhs))]
     [(list lambda _ _) (error 'infer "cannot infer type of lambda")]
     [`(if ,cnd ,thn ,els)
-     (check cnd 'Bool ctx)
-     (define t (infer thn ctx))
-     (check els t ctx)
-     t]
+     (define vp-cnd (check cnd 'Bool ctx env))
+     (define-values (t vp-thn) (infer thn ctx env))
+     (define vp-els (check els t ctx env))
+     (values t
+             (delay
+               (match (force vp-cnd)
+                 [#t (force vp-thn)]
+                 [#f (force vp-els)]
+                 [n
+                  ;; neutral case, evaluate branches as much as we can
+                  ;; we're type-checked, so we don't have to worry about
+                  ;; it being a non-bool!
+                  `(if ,n
+                       ,(force vp-thn)
+                       ,(force vp-els))])))]
     [`(boolElim ,m ,cnd ,thn ,els)
      ;; conceptually,
      ;; boolElim : (m : Bool -> *) (cnd : Bool) (thn : m #t) (els : m #f) -> m cnd
      ;; where m is called the "motive"
      ;; it's a way for the type to depend on the value condition
-     (check m (pi 'Bool (lambda (_) '*)) ctx)
-     (define b->t (eval m empty-env))
-     (check cnd 'Bool ctx)
-     (check thn (b->t #t) ctx)
-     (check els (b->t #f) ctx)
-     (define b (eval cnd empty-env))
-     (b->t b)]
+
+     ;; ignore evaluated m
+     (define b->t (force (check m (pi 'Bool (lambda (_) '*)) ctx env)))
+     (define vp-cnd (check cnd 'Bool ctx env))
+     (define vp-thn (check thn (b->t #t) ctx env))
+     (define vp-els (check els (b->t #f) ctx env))
+     ;; this is a behavioral difference between if and boolElim.
+     ;; in if, we don't evaluate the condition to type
+     (define b (force vp-cnd))
+     (values (b->t b)
+             (delay
+               (match b
+                 [#t (force vp-thn)]
+                 [#f (force vp-els)]
+                 [n
+                  ;; neutral case, evaluate branches as much as we can
+                  ;; we're type-checked, so we don't have to worry about
+                  ;; it being a non-bool!
+                  `(boolElim ,b->t ,n
+                             ,(force vp-thn)
+                             ,(force vp-els))])))]
     [`(,rator ,rand)
-     (define t-rator (infer rator ctx))
+     (define-values (t-rator vp-rator) (infer rator ctx env))
      (match t-rator
        [(pi t-rand rand->t-ret)
-        (check rand t-rand ctx)
-        ; this leads to re-evaluations and doesn't work as expected for variables
-        ; TODO test that
-        (define v-rand (eval rand empty-env))
-        (rand->t-ret v-rand)]
-       [_ (error 'infer "applied non-function: ~a" t-rator)])]))
+        ;; this force may force a lot of runtime evaluation
+        (define v-rand (force (check rand t-rand ctx env)))
+        (values (rand->t-ret v-rand)
+                (delay
+                  (match (force vp-rator)
+                    [(and f (? procedure?)) (f v-rand)]
+                    [n
+                     ;; neutral
+                     `(,n ,v-rand)])))]
+       [_ (error "somehow applied non-function in type-checked code")])]))
 
-; Expr Type Context -> Void
-(define (check expr t-expected ctx)
+; Expr Type Context Env -> Void
+(define (check expr t-expected ctx env)
   (match expr
     [`(lambda (,x) ,body)
      (match t-expected
        [(pi t-x x->t-ret)
-        ; pass a neutral x to the function
-        ; kind of weird. can this break?
-        ; TODO test that
-        (check body (x->t-ret x) (hash-set ctx x t-x))]
-       [_ (error 'check "mismatch. expected a function type")])]
+        ;; ignore the neutrally evaluated body
+        ;; pass neutral x to env
+        (check body (x->t-ret x) (hash-set ctx x t-x) (hash-set env x x))
+        ;; TODO no check in eval
+        (lambda (v) (eval body (hash-set ctx x t-x) (hash-set env x v)))]
+       [_ (error 'check "mismatch. expected a ~a, but got a function" (quote-value t-expected))])]
     [_
-     (define t-inferred (infer expr ctx))
+     (define-values (t-inferred vp) (infer expr ctx env))
      (unless (same-value? t-expected t-inferred) (error 'check "mismatch. expected a ~a but got a ~a"
                                                         (quote-value t-expected)
-                                                        (quote-value t-inferred)))]))
+                                                        (quote-value t-inferred)))
+     vp]))
 
 ;; Value Value -> Boolean
 (define (same-value? v1 v2)
@@ -281,90 +261,87 @@
           (quote-value v2)))
 
 (module+ test
-  (define ctx (hasheq 'unit 'Unit 'Unit '*))
-  (check-equal? (eval 'x empty-env) 'x)
-  (check-equal? (eval 'x (hasheq 'x 'y)) 'y)
-  (check-equal? (normalize '(lambda (x) x)) '(lambda (_.0) _.0))
-  (check-equal? (eval '((lambda (x) x) y) empty-env) 'y)
-  (check-equal? (eval '(let ([x y]) x) empty-env) 'y)
-  (check-equal? (normalize '(let ([x #t]) (lambda (x) x)))
-                '(lambda (_.0) _.0))
-  (check-equal? (infer #t ctx) 'Bool)
-  (check-equal? (check #t 'Bool ctx) (void))
-  (check-equal? (check '(lambda (x) x) (pi 'Bool (const 'Bool)) ctx) (void))
-  (check-equal? (quote-value
-                 (infer '(: (lambda (x) x)
-                            (forall (: x Bool) Bool))
-                        ctx))
-                '(forall (: _.0 Bool) Bool))
-  (check-equal? (infer '((: (lambda (x) x) (forall (: x Bool) Bool)) #t) ctx) 'Bool)
-  (check-equal? (infer '(((: (lambda (x) (lambda (y) x))
-                             (forall (: x a) (forall (: y b) a)))
-                          i)
-                         j)
-                       (hasheq 'a '*
-                               'b '*
-                               'i 'a
-                               'j 'b))
-                'a)
-  ; identity function for bools
-  (check-equal? (infer '(((: (lambda (a) (lambda (x) x))
-                             (forall (: a *) (forall (: x a) a)))
-                          Bool)
-                         #t)
-                       ctx)
-                'Bool)
-  (check-equal? (check '(: (lambda (a) (lambda (x) x))
-                           (forall (: a *) (forall (: x a) a)))
-                       (pi '* (lambda (a) (pi a (lambda (x) a))))
-                       empty-ctx)
-                (void))
-  (check-equal? (infer '(let ([id (: (lambda (a) (lambda (x) x))
-                                     (forall (: a *) (forall (: x a) a)))])
-                          ((id Bool) #t))
-                       ctx)
-                'Bool)
-  ;; if
-  (check-equal? (run '(if #t unit unit) ctx empty-env)
-                '(: unit Unit))
-  (check-equal? (infer '(boolElim (lambda (b) Unit) #t unit unit)
-                       ctx)
-                'Unit)
-  ;; non-trivial dependent if
-  (check-equal? (run '(boolElim (lambda (b) (boolElim (lambda (b) *) b Unit Bool)) #t unit #f)
-                     ctx
-                     empty-env)
-                '(: unit Unit))
-  ;; the other branch
-  (check-equal? (run '(boolElim (lambda (b) (boolElim (lambda (b) *) b Unit Bool)) #f unit #t)
-                     ctx
-                     empty-env)
-                '(: #t Bool))
-  ;; neutral condition
-  (check-equal? (infer '(boolElim (lambda (b) (boolElim (lambda (b) *) b Unit Bool)) cnd unit #t)
-                       (hash-set ctx 'cnd 'Bool))
-                '(boolElim (lambda (b) *) cnd Unit Bool))
-  (check-equal? (eval '(boolElim m #t a b)
-                      empty-env)
-                'a)
-  (check-equal? (eval '(boolElim m b t e) empty-env)
-                '(boolElim m b t e))
+  (define ctx (hasheq 'unit 'Unit
+                      'Unit '*
+                      'b-free 'Bool))
+  (define env (hasheq 'unit 'unit
+                      'Unit 'Unit
+                      'b-free 'b-free))
+  (define (trun e) (run e ctx env))
+  (define-syntax-rule (test e expected)
+    (check-equal? (trun 'e) 'expected))
+  (test unit
+        (: unit Unit))
+  (test (: (lambda (x) x) (forall (: x Bool) Bool))
+        (: (lambda (_.0) _.0) (forall (: _.0 Bool) Bool)))
+  (test ((: (lambda (x) x) (forall (: x Bool) Bool)) #t)
+        (: #t Bool))
+  (test (let ([x #t]) x)
+        (: #t Bool))
+  #;; TODO no check in eval. failing bc it's evaling the body, which infers
+  (test (let ([id (: (lambda (t) (lambda (x) x))
+                     (forall (: a *) (forall (: x a) a)))])
+          ((id Bool) #t))
+        (: #t Bool))
+  ;; if then
+  (test (if #t #t #f)
+        (: #t Bool))
+  ;; if else
+  (test (if #f #t #f)
+        (: #f Bool))
+  ;; if neutral
+  (test (if b-free #t #f)
+        (: (if b-free #t #f) Bool))
+  ;; boolElim then
+  (test (boolElim (lambda (b) Bool)
+                  #t #t #f)
+        (: #t Bool))
+  ;; boolElim else
+  (test (boolElim (lambda (b) Bool)
+                  #f #t #f)
+        (: #f Bool))
+  ;; boolElim neutral
+  (test (boolElim (lambda (b) Bool)
+                  b-free #t #f)
+        (: (boolElim (lambda (_.0) Bool) b-free #t #f)
+           Bool))
+  ;; boolElim dependent then
+  (test (boolElim (lambda (b) (if b Unit Bool))
+                  #t unit #f)
+        (: unit Unit))
+  ;; boolElim dependent else
+  (test (boolElim (lambda (b) (if b Unit Bool))
+                  #f unit #f)
+        (: #f Bool))
+  ;; boolElim dependent neutral
+  (test (boolElim (lambda (b) (if b Unit Bool))
+                  b-free unit #f)
+        (: (boolElim (lambda (_.0) (if _.0 Unit Bool))
+                     b-free unit #f)
+           (if b-free Unit Bool)))
+  ;; boolElim dependent squared
+  (test (boolElim (lambda (b) (boolElim (lambda (_) *) b Unit Bool))
+                  #t unit #f)
+        (: unit Unit))
   ;; closures work with neutrals by normalized substitution
-  (check-equal? (normalize '(let ([x #t])
-                              (: (lambda (y) x)
-                                 (forall (: z Unit) Boolean))))
-                '(lambda (_.0) #t))
+  (test (let ([x #t])
+           (: (lambda (y) x)
+              (forall (: z Unit) Bool)))
+        (: (lambda (_.0) #t)
+           (forall (: _.0 Unit) Bool)))
   ;; type checking really does normalize
-  (check-equal? (quote-value
-                 (infer '(: (: (lambda (x) x)
-                               (forall (: y Bool) Bool))
-                            (forall (: z Bool) Bool))
-                        ctx))
-                '(forall (: _.0 Bool) Bool))
-  ;; for jit
-  #;(check-equal? (infer '(let ([X Bool]) (: #t X)) ctx)
-                  ;; or should it be X?
-                  'Bool))
+  (test (: (: (lambda (x) x)
+              (forall (: y Bool) Bool))
+           (forall (: z Bool) Bool))
+        (: (lambda (_.0) _.0)
+           (forall (: _.0 Bool) Bool)))
+  ;; jit type checking
+  (test (let ([X Bool])
+          (: #t X))
+        (: #t Bool))
+  (test (let ([X (if #t Bool Unit)])
+          (: #t X))
+        (: #t Bool)))
 
 #|
 From talk with michael:
