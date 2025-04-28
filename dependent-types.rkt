@@ -7,7 +7,8 @@
 ; - "jit type checking" (not sure what the actual name for this is)
 
 (module+ test (require (except-in rackunit check)))
-(require racket/promise)
+(require racket/promise
+         racket/trace)
 
 ;; TODO add naturals
 ;; TODO add vectors
@@ -83,7 +84,7 @@
 ;; Infers expr type, evaluates it, then quotes and annotates it with its type
 ;; (run #t ctx env) ~> '(: #t Bool)
 (define (run expr ctx env)
-  (define-values (t vp) (infer expr ctx env))
+  (define-values (t vp) (infer expr ctx env #t))
   `(: ,(quote-value (force vp)) ,(quote-value t)))
 
 (module+ test
@@ -94,10 +95,16 @@
                 '(: (lambda (_.0) _.0)
                     (forall (: _.0 Bool) Bool))))
 
+#;
+(define-syntax-rule (for-typing e ...)
+  (cond
+    [should-type-check?
+     e ...]
+    [else 'not-type-checking]))
+
 ; Expr Ctx Env -> Value
 (define (eval expr ctx env)
-  ;; TODO no checking in eval
-  (define-values (_ vp) (infer expr ctx env))
+  (define-values (_ vp) (infer expr ctx env #f))
   (force vp))
 
 ; Value -> Expr
@@ -150,39 +157,46 @@
 (module+ test
   (check-equal? (number->var 0) '_.0))
 
-; Expr Context Env -> (values Type (Promise Value))
-(define (infer expr ctx env)
+; Expr Context Env Boolean -> (values Type (Promise Value))
+(define (infer expr ctx env should-type-check?)
+  (define-syntax-rule (for-typing e ...)
+    (cond
+      [should-type-check?
+       e ...]
+      [else 'not-type-checking]))
   (match expr
     ;; no need to delay '*, force does nothing to non-promises
-    ['* (values '* '*)]
-    ['Bool (values '* 'Bool)]
+    ['* (values (for-typing '*) '*)]
+    ['Bool (values (for-typing '*) 'Bool)]
     [(? symbol? x)
-     (define t (hash-ref ctx x (lambda () (error 'infer "unbound variable: ~a" x))))
-     (define vp (hash-ref env x))
+     (define t (for-typing (hash-ref ctx x (lambda () (error 'infer "unbound variable: ~a" x)))))
+     (define vp (hash-ref env x x))
      ;; remember, the env holds promises of values
      (values t vp)]
     [(? boolean? b)
-     (values 'Bool b)]
+     (values (for-typing 'Bool) b)]
     [`(: ,e ,p)
-     (define t (force (check p '* ctx env)))
-     (define vp (check e t ctx env))
+     (define t (for-typing (force (check p '* ctx env should-type-check?))))
+     (define vp (check e t ctx env should-type-check?))
      (values t vp)]
     [`(forall (: ,x ,p-x) ,p-ret)
-     (define t-x (force (check p-x '* ctx env)))
+     (define t-x (force (check p-x '* ctx env should-type-check?)))
      ;; pass neutral x to env
      ;; ignore neutrally evaluated p-ret
-     (check p-ret '* (hash-set ctx x t-x) (hash-set env x x))
-     ;; TODO no check in eval
-     (values '* (pi t-x (lambda (v-x) (eval p-ret (hash-set ctx x t-x) (hash-set env x v-x)))))]
+     (for-typing (check p-ret '* (hash-set ctx x t-x) (hash-set env x x) should-type-check?))
+     (values (for-typing '*) (pi t-x (lambda (v-x) (eval p-ret (hash-set ctx x t-x) (hash-set env x v-x)))))]
     [`(let ([,x ,rhs]) ,body)
-     (define-values (t-rhs vp-rhs) (infer rhs ctx env))
+     (define-values (t-rhs vp-rhs) (infer rhs ctx env should-type-check?))
      ;; remember env stores promises
-     (infer body (hash-set ctx x t-rhs) (hash-set env x vp-rhs))]
-    [(list lambda _ _) (error 'infer "cannot infer type of lambda")]
+     (infer body (hash-set ctx x t-rhs) (hash-set env x vp-rhs) should-type-check?)]
+    [`(lambda (,x) ,body)
+     (if should-type-check?
+         (error 'infer "cannot infer type of lambda")
+         (values 'not-type-checking (lambda (v) (eval body ctx (hash-set env x v)))))]
     [`(if ,cnd ,thn ,els)
-     (define vp-cnd (check cnd 'Bool ctx env))
-     (define-values (t vp-thn) (infer thn ctx env))
-     (define vp-els (check els t ctx env))
+     (define vp-cnd (check cnd 'Bool ctx env should-type-check?))
+     (define-values (t vp-thn) (infer thn ctx env should-type-check?))
+     (define vp-els (check els t ctx env should-type-check?))
      (values t
              (delay
                (match (force vp-cnd)
@@ -202,10 +216,12 @@
      ;; it's a way for the type to depend on the value condition
 
      ;; ignore evaluated m
-     (define b->t (force (check m (pi 'Bool (lambda (_) '*)) ctx env)))
-     (define vp-cnd (check cnd 'Bool ctx env))
-     (define vp-thn (check thn (b->t #t) ctx env))
-     (define vp-els (check els (b->t #f) ctx env))
+     (define b->t (if should-type-check?
+                      (force (check m (pi 'Bool (lambda (_) '*)) ctx env should-type-check?))
+                      (lambda (_) 'not-type-checking)))
+     (define vp-cnd (check cnd 'Bool ctx env should-type-check?))
+     (define vp-thn (check thn (b->t #t) ctx env should-type-check?))
+     (define vp-els (check els (b->t #f) ctx env should-type-check?))
      ;; this is a behavioral difference between if and boolElim.
      ;; in if, we don't evaluate the condition to type
      (define b (force vp-cnd))
@@ -222,43 +238,64 @@
                              ,(force vp-thn)
                              ,(force vp-els))])))]
     [`(,rator ,rand)
-     (define-values (t-rator vp-rator) (infer rator ctx env))
-     (match t-rator
-       [(pi t-rand rand->t-ret)
-        ;; this force may force a lot of runtime evaluation
-        (define v-rand (force (check rand t-rand ctx env)))
-        (values (rand->t-ret v-rand)
-                (delay
-                  (match (force vp-rator)
+     (define-values (t-rator vp-rator) (infer rator ctx env should-type-check?))
+     (define (do-apply v-rator v-rand)
+       (match v-rator
                     [(and f (? procedure?)) (f v-rand)]
                     [n
                      ;; neutral
-                     `(,n ,v-rand)])))]
-       [_ (error "somehow applied non-function in type-checked code")])]))
+                     `(,n ,v-rand)]))
+     (if should-type-check?
+         (match t-rator
+           [(pi t-rand rand->t-ret)
+            ;; this force may force a lot of runtime evaluation
+            (define v-rand (force (check rand t-rand ctx env should-type-check?)))
+            (values (rand->t-ret v-rand)
+                    (delay (do-apply (force vp-rator) v-rand)))]
+           [_ (error "somehow applied non-function in type-checked code")])
+         (let ([v-rand (eval rand ctx env)])
+           (values 'not-type-checking
+                   (delay (do-apply (force vp-rator) v-rand)))))]))
 
-; Expr Type Context Env -> Void
-(define (check expr t-expected ctx env)
+; Expr Type Context Env Boolean -> Void
+(define (check expr t-expected ctx env should-type-check?)
+  (define-syntax-rule (for-typing e ...)
+    (cond
+      [should-type-check?
+       e ...]
+      [else 'not-type-checking]))
   (match expr
     [`(lambda (,x) ,body)
-     (match t-expected
-       [(pi t-x x->t-ret)
-        ;; ignore the neutrally evaluated body
-        ;; pass neutral x to env
-        (check body (x->t-ret x) (hash-set ctx x t-x) (hash-set env x x))
-        ;; TODO no check in eval
-        (lambda (v) (eval body (hash-set ctx x t-x) (hash-set env x v)))]
-       [_ (error 'check "mismatch. expected a ~a, but got a function" (quote-value t-expected))])]
+     (for-typing
+      (match t-expected
+        [(pi t-x x->t-ret)
+         ;; ignore the neutrally evaluated body
+         ;; pass neutral x to env
+         (check body (x->t-ret x) (hash-set ctx x t-x) (hash-set env x x) should-type-check?)]
+        [_ (error 'check "mismatch. expected a ~a, but got a function" (quote-value t-expected))]))
+     ;; non-delayed eval is ok bc it's a lambda
+     (eval expr ctx env)]
     [_
-     (define-values (t-inferred vp) (infer expr ctx env))
-     (unless (same-value? t-expected t-inferred) (error 'check "mismatch. expected a ~a but got a ~a"
-                                                        (quote-value t-expected)
-                                                        (quote-value t-inferred)))
+     (define-values (t-inferred vp) (infer expr ctx env should-type-check?))
+     (for-typing
+      (unless (same-value? t-expected t-inferred) (error 'check "mismatch. expected a ~a but got a ~a"
+                                                         (quote-value t-expected)
+                                                         (quote-value t-inferred))))
      vp]))
 
 ;; Value Value -> Boolean
 (define (same-value? v1 v2)
   (equal? (quote-value v1)
           (quote-value v2)))
+
+;; maybe this is failing because of delayed evaluation interacting weirdly with the parameter.
+;; in that case, one potential solution would be to manually pass should-typecheck? instead of using a parameter.
+#|
+> (define current-x (make-parameter 'bad))
+> (define p (parameterize ([current-x 'good]) (delay (current-x))))
+> (force p)
+'bad
+|#
 
 (module+ test
   (define ctx (hasheq 'unit 'Unit
@@ -278,7 +315,7 @@
         (: #t Bool))
   (test (let ([x #t]) x)
         (: #t Bool))
-  #;; TODO no check in eval. failing bc it's evaling the body, which infers
+  ;; polymorphic identity function
   (test (let ([id (: (lambda (t) (lambda (x) x))
                      (forall (: a *) (forall (: x a) a)))])
           ((id Bool) #t))
@@ -483,7 +520,7 @@ infer : Expr Ctx Env -> (values Type (Promise Value))
 check : Expr Type Ctx Env -> (Promise Value)
 eval : Expr Env -> Value
 
-TODO should-type?
+to avoid duplicate checks, pass in should-type-check?
 infer x ctx env =
   assert x in ctx
   t = ctx[x]
