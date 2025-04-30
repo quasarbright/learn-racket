@@ -17,20 +17,25 @@
 
 ;; TODO add naturals
 ;; TODO add vectors
-;; TODO more convenient syntax for lambda annotation
+;; TODO more convenient syntax for lambda annotation, and sugar in general
 ;; TODO recursion with termination checking
 ;; TODO optimization where we avoid forcing the value of an argument/if condition when we won't need to
+;; TODO propositions, equality, decidability
 
 ;; surface syntax
 
 ; An Expr is one of
 ; '*                               (the kind of types)
 ; (forall (: symbol Expr) Expr)    (dependent function type)
+; (exists (: symbol Expr) Expr)    (dependent pair type)
 ; symbol                           (variable)
 ; (: Expr Expr)                    (type annotaation)
 ; (lambda (symbol) Expr)
 ; (let [(symbol Expr)] Expr)
-; (Expr Expr)
+; (pair Expr Expr)                 (pair introduction)
+; (fst Expr)                       (pair elimination)
+; (snd Expr)                       (pair elimination)
+; (Expr Expr)                      (function application)
 ; #t
 ; #f
 ; (if Expr Expr Expr)
@@ -56,14 +61,19 @@
 ; A Value is one of
 ; #t
 ; #f
-; '*                                (the kind of types)
-; 'Bool                             (the type of booleans)
-; (Value -> Value)                  (function value)
-(struct pi [t-x x->t-ret]);         (dependent function type)
+; '*                                              (the kind of types)
+; 'Bool                                           (the type of booleans)
+(struct pair [fst snd]);                          (pairs); we don't just use cons bc then it's ambiguous with neutrals
+; (Value -> Value)                                (function value)
+(struct pi [t-x x->t-ret] #:transparent);         (dependent function type)
 ;; where
 ;; t-x is a Type
 ;; x->t-ret is a Value -> Type
-; NeutralExpr                       (irreducible expression)
+(struct sigma [t-fst fst->t-snd]);                (dependent pair type)
+;; where
+;; t-x is a Type
+;; x->t-snd is a Value -> Type
+; NeutralExpr                                     (irreducible expression)
 ; Represents a value from evaluating an expression.
 ; Function types are represented by Racket functions
 
@@ -74,7 +84,9 @@
 ; (list NeutralExpr Value)                        (application)
 ; (list 'if NeutralExpr Value Value)
 ; (list 'boolElim Expr NeutralExpr Value Value)   (dependent if)
-;;                ^ Expr because it's only relevant to type-checking
+;                 ^ Expr because it's only relevant to type-checking
+; (list 'fst NeutralExpr)
+; (list 'snd NeutralExpr)
 ; Represents an irreducible expression
 
 ; An Env is a (hash symbol (Promise Value))
@@ -123,8 +135,9 @@
       ['* '*]
       [(? symbol?) v]
       [(? boolean?) v]
-      [`(,n-rator ,v-rand)
-       `(,(loop n-rator) ,(loop v-rand))]
+      [(pair v1 v2) `(pair ,(loop v1) ,(loop v2))]
+      [`(fst ,n) `(fst ,(loop n))]
+      [`(snd ,n) `(snd ,(loop n))]
       [`(boolElim ,m ,n-cnd ,v-thn ,v-els)
        `(boolElim ,(loop m) ,(loop n-cnd) ,(loop v-thn) ,(loop v-els))]
       [`(if ,n-cnd ,v-thn ,v-els)
@@ -133,9 +146,15 @@
        (define x (my-gensym))
        `(forall (: ,x ,(loop t-arg))
                 ,(loop (arg->t-ret x)))]
+      [(sigma t-fst fst->t-snd)
+       (define x (my-gensym))
+       `(exists (: ,x ,(loop t-fst))
+                ,(loop (fst->t-snd x)))]
       [(? procedure?)
        (define x (my-gensym))
-       `(lambda (,x) ,(loop (v x)))])))
+       `(lambda (,x) ,(loop (v x)))]
+      [`(,n-rator ,v-rand)
+       `(,(loop n-rator) ,(loop v-rand))])))
 
 (module+ test
   (check-equal? (quote-value 'x) 'x)
@@ -151,7 +170,15 @@
   ; type of the identity function
   ; (forall (: a *) (forall (: x a) a))
   (check-equal? (quote-value (pi '* (lambda (a) (pi a (lambda (x) a)))))
-                '(forall (: _.0 *) (forall (: _.1 _.0) _.0))))
+                '(forall (: _.0 *) (forall (: _.1 _.0) _.0)))
+  (check-equal? (quote-value (sigma '* (lambda (a) (sigma a (lambda (x) a)))))
+                '(exists (: _.0 *) (exists (: _.1 _.0) _.0)))
+  (check-equal? (quote-value (pair (lambda (x) x) (lambda (x) x)))
+                '(pair (lambda (_.0) _.0) (lambda (_.1) _.1)))
+  (check-equal? (quote-value '(fst a))
+                '(fst a))
+  (check-equal? (quote-value '(snd a))
+                '(snd a)))
 
 ;; Natural -> symbol
 ;; like minikanren
@@ -189,6 +216,12 @@
      ;; ignore neutrally evaluated p-ret
      (for-typing (check p-ret '* (hash-set ctx x t-x) (hash-set env x x) should-type-check?))
      (values (for-typing '*) (pi t-x (lambda (v-x) (eval p-ret (hash-set ctx x t-x) (hash-set env x v-x)))))]
+    [`(exists (: ,x ,p-fst) ,p-snd)
+     (define t-fst (force (check p-fst '* ctx env should-type-check?)))
+     ;; pass neutral x to env
+     ;; ignore neutrally evaluated p-snd
+     (for-typing (check p-snd '* (hash-set ctx x t-fst) (hash-set env x x) should-type-check?))
+     (values (for-typing '*) (sigma t-fst (lambda (v-fst) (eval p-snd (hash-set ctx x t-fst) (hash-set env x v-fst)))))]
     [`(let ([,x ,rhs]) ,body)
      (define-values (t-rhs vp-rhs) (infer rhs ctx env should-type-check?))
      ;; remember env stores promises
@@ -197,6 +230,37 @@
      (if should-type-check?
          (error 'infer "cannot infer type of lambda")
          (values 'not-type-checking (lambda (v) (eval body ctx (hash-set env x v)))))]
+    [`(pair ,a ,b)
+     (define-values (t-a vp-a) (infer a ctx env should-type-check?))
+     (define-values (t-b vp-b) (infer b ctx env should-type-check?))
+     (values (for-typing (sigma t-a (lambda (_) t-b)))
+             (delay (pair (force vp-a) (force vp-b))))]
+    [`(fst ,e)
+     (define-values (t-e vp-e) (infer e ctx env should-type-check?))
+     (define t-fst
+       (for-typing
+        (match t-e
+          [(sigma t-fst _) t-fst]
+          [t (error 'infer "expected a pair, but got a ~a" (quote-value t))])))
+     (values t-fst (delay (match (force vp-e)
+                            [(pair fst _) fst]
+                            [n `(fst ,n)])))]
+    [`(snd ,e)
+     (define-values (t-e vp-e) (infer e ctx env should-type-check?))
+     (define t-snd
+       (for-typing
+        (match t-e
+          [(sigma _ fst->t-snd)
+           (define v-fst
+             (match (force vp-e)
+               [(pair fst _) fst]
+               [n `(fst ,n)]))
+           ;; TODO weird if neutral, test
+           (fst->t-snd v-fst)]
+          [t (error 'infer "expected a pair, but got a ~a" (quote-value t))])))
+     (values t-snd (delay (match (force vp-e)
+                            [(pair _ snd) snd]
+                            [n `(snd ,n)])))]
     [`(if ,cnd ,thn ,els)
      (define vp-cnd (check cnd 'Bool ctx env should-type-check?))
      (define-values (t-thn vp-thn) (infer thn ctx env should-type-check?))
@@ -632,3 +696,35 @@ will add special case to reduce (if n then v else v) ~> v
 should still keep boolElim around to make it easier to explicitly specify motive
 when all else fails
 |#
+
+#|
+adding pairs
+
+e := ...
+   | (exists (: x e) e)
+   | (pair e e)
+   | (fst e)
+   | (snd e)
+v := ...
+   | (sigma v (v -> v))
+
+ctx |- e1 <= A
+ctx, x = eval(e1) : A |- e1 <= B
+----------------------------------------- (PAIR<=)
+ctx |- (pair e1 e2) <= (exists (: x A) B)
+
+ctx |- e1 => A
+ctx |- e2 => B
+----------------------------------------- (PAIR=>)
+ctx |- (pair e1 e2) => (exists (: _ A) B)
+
+ctx |- e => (exists (: x A) B)
+------------------------------ (FST)
+ctx |- (fst e) => A
+
+ctx |- e => (exists (: x A) B)
+------------------------------ (SND)
+ctx |- (snd e) => B
+|#
+
+(error "left off about to do exists type check rule and think about potential better inference")
