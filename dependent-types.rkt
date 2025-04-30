@@ -4,7 +4,12 @@
 ; initially taken from https://www.andres-loeh.de/LambdaPi/LambdaPi.pdf
 ; but expanded on in several ways
 ; - booleans (with dependent if)
-; - "jit type checking" (not sure what the actual name for this is)
+; - "just-in-time type checking" (not sure what the actual name for this is)
+; you can do stuff like (let ([X Bool]) (: #t X)).
+; evaluation is interleaved with type checking.
+; not all runtime code is evaluated during type checking, but some is.
+; there are no duplicate evaluations or checks,
+; but sometimes code is evaluated earlier than it might need to be.
 
 (module+ test (require (except-in rackunit check)))
 (require racket/promise
@@ -13,9 +18,8 @@
 ;; TODO add naturals
 ;; TODO add vectors
 ;; TODO more convenient syntax for lambda annotation
-;; TODO remove boolElim? pretty sure you could just do the same thing with a lambda and if
-;; or maybe somehow infer the motive from the branches. you may end up with a neutral if in the type though.
 ;; TODO recursion with termination checking
+;; TODO optimization where we avoid forcing the value of an argument/if condition when we won't need to
 
 ;; surface syntax
 
@@ -195,20 +199,35 @@
          (values 'not-type-checking (lambda (v) (eval body ctx (hash-set env x v)))))]
     [`(if ,cnd ,thn ,els)
      (define vp-cnd (check cnd 'Bool ctx env should-type-check?))
-     (define-values (t vp-thn) (infer thn ctx env should-type-check?))
-     (define vp-els (check els t ctx env should-type-check?))
-     (values t
-             (delay
-               (match (force vp-cnd)
-                 [#t (force vp-thn)]
-                 [#f (force vp-els)]
-                 [n
-                  ;; neutral case, evaluate branches as much as we can
-                  ;; we're type-checked, so we don't have to worry about
-                  ;; it being a non-bool!
-                  `(if ,n
-                       ,(force vp-thn)
-                       ,(force vp-els))])))]
+     (define-values (t-thn vp-thn) (infer thn ctx env should-type-check?))
+     (define-values (t-els vp-els) (infer els ctx env should-type-check?))
+     ;; an unfortunate force, but necessary for better inference
+     (match (force vp-cnd)
+       [#t (values t-thn vp-thn)]
+       [#f (values t-els vp-els)]
+       [n
+        ;; neutral case, evaluate branches.
+        ;; we're type-checked, so we don't have to worry about cnd being a non-bool!
+        (define t
+          (if (same-value? t-thn t-els)
+              ;; special case for (if b t t) ~> t
+              ;; to aid type equality
+              t-thn
+              `(if ,n
+                   ,t-thn
+                   ,t-els)))
+        (define vp
+          (delay
+            (define v-thn (force vp-thn))
+            (define v-els (force vp-els))
+            (if (same-value? v-thn v-els)
+                ;; special case for (if b x x) ~> x
+                ;; to aid type equality
+                v-thn
+                `(if ,n
+                     ,v-thn
+                     ,v-els))))
+        (values t vp)])]
     [`(boolElim ,m ,cnd ,thn ,els)
      ;; conceptually,
      ;; boolElim : (m : Bool -> *) (cnd : Bool) (thn : m #t) (els : m #f) -> m cnd
@@ -329,6 +348,17 @@
   ;; if neutral
   (test (if b-free #t #f)
         (: (if b-free #t #f) Bool))
+  ;; if neutral special case
+  (test (if b-free unit unit)
+        (: unit Unit))
+  ;; dependent if
+  (test (if b-free #t unit)
+        (: (if b-free #t unit)
+           (if b-free Bool Unit)))
+  ;; dependent if eval
+  (test (if #t #t unit)
+        ;; it knows to choose the then branch of the type (if #t Bool Unit)
+        (: #t Bool))
   ;; boolElim then
   (test (boolElim (lambda (b) Bool)
                   #t #t #f)
@@ -362,8 +392,8 @@
         (: unit Unit))
   ;; closures work with neutrals by normalized substitution
   (test (let ([x #t])
-           (: (lambda (y) x)
-              (forall (: z Unit) Bool)))
+          (: (lambda (y) x)
+             (forall (: z Unit) Bool)))
         (: (lambda (_.0) #t)
            (forall (: _.0 Unit) Bool)))
   ;; type checking really does normalize
@@ -582,4 +612,23 @@ But it tries not to evaluate it
 #check (nVec (fib 1000) : Vector Unit 1) -- fails with maximum recursion error
 #check (nVec (fib 1000) : Vector Unit (fib 1000)) -- succeeds without evaluating anything
 #check (nVec (fib 1000) : Vector Unit (fib (1000 + 0))) -- succeeds via symbolic simplification
+|#
+
+#|
+Thinking about getting rid of boolElim
+ctx |- if cnd then thn else els => if cnd then t-thn else t-els
+--------------------------------------------------------------- (IF)
+ctx |- cnd <= Bool
+ctx |- thn => t-thn
+ctx |- els => t-els
+
+doesn't make sense since cnd is a (possibly non-neutral) expression and t-thn and t-els are type values.
+but if you eval cnd first it's alright.
+This is analogous to evaluating application arguments, and mirrors what happens to the condition in boolElim.
+
+that's definitely going to lead to false negatives for type equality.
+will add special case to reduce (if n then v else v) ~> v
+
+should still keep boolElim around to make it easier to explicitly specify motive
+when all else fails
 |#
