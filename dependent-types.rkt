@@ -255,7 +255,6 @@
              (match (force vp-e)
                [(pair fst _) fst]
                [n `(fst ,n)]))
-           ;; TODO weird if neutral, test
            (fst->t-snd v-fst)]
           [t (error 'infer "expected a pair, but got a ~a" (quote-value t))])))
      (values t-snd (delay (match (force vp-e)
@@ -358,6 +357,14 @@
         [_ (error 'check "mismatch. expected a ~a, but got a function" (quote-value t-expected))]))
      ;; non-delayed eval is ok bc it's a lambda
      (eval expr ctx env)]
+    [`(pair ,fst ,snd)
+     (match t-expected
+       [(sigma t-fst fst->t-snd)
+        (define vp-fst (check fst t-fst ctx env should-type-check?))
+        (define v-fst (force vp-fst))
+        (define vp-snd (check snd (fst->t-snd v-fst) ctx env should-type-check?))
+        (delay (pair v-fst (force vp-snd)))]
+       [_ (error 'check "mismatch. expected a ~a, but got a pair" (quote-value t-expected))])]
     [_
      (define-values (t-inferred vp) (infer expr ctx env should-type-check?))
      (for-typing
@@ -383,10 +390,12 @@
 (module+ test
   (define ctx (hasheq 'unit 'Unit
                       'Unit '*
-                      'b-free 'Bool))
+                      'b-free 'Bool
+                      'pair-free (sigma 'Bool (lambda (_) 'Unit))))
   (define env (hasheq 'unit 'unit
                       'Unit 'Unit
-                      'b-free 'b-free))
+                      'b-free 'b-free
+                      'pair-free 'pair-free))
   (define (trun e) (run e ctx env))
   (define-syntax-rule (test e expected)
     (check-equal? (trun 'e) 'expected))
@@ -472,7 +481,31 @@
         (: #t Bool))
   (test (let ([X (if #t Bool Unit)])
           (: #t X))
-        (: #t Bool)))
+        (: #t Bool))
+  ;; paradox
+  ;; TODO https://en.wikipedia.org/wiki/System_U#Girard's_paradox
+
+  ;; pair infer
+  (test (pair #t unit)
+        (: (pair #t unit)
+           (exists (: _.0 Bool) Unit)))
+  (test (fst (pair #t unit))
+        (: #t Bool))
+  (test (snd (pair #t unit))
+        (: unit Unit))
+  ;; fst neutral
+  (test (fst pair-free)
+        (: (fst pair-free)
+           Bool))
+  ;; snd neutral
+  (test (snd pair-free)
+        (: (snd pair-free)
+           Unit))
+  ;; pair check
+  (test (: (pair #t unit) (exists (: b Bool) (if b Unit Bool)))
+        (: (pair #t unit) (exists (: _.0 Bool) (if _.0 Unit Bool))))
+  (test (: (pair #f #f) (exists (: b Bool) (if b Unit Bool)))
+        (: (pair #f #f) (exists (: _.0 Bool) (if _.0 Unit Bool)))))
 
 #|
 From talk with michael:
@@ -726,5 +759,3 @@ ctx |- e => (exists (: x A) B)
 ------------------------------ (SND)
 ctx |- (snd e) => B
 |#
-
-(error "left off about to do exists type check rule and think about potential better inference")
