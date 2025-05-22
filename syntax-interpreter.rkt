@@ -14,13 +14,11 @@
 ;; - interpreter helpers need expanded syntax, which might make it hard to unit test them
 
 (module+ test (require rackunit))
-(require syntax-spec-v3
+(require syntax-spec-dev
          syntax/parse
-         (for-syntax syntax/parse
-                     racket/syntax-srcloc)
+         (for-syntax syntax/parse)
          racket/syntax-srcloc
-         (for-template syntax-spec-v3)
-         syntax/id-table
+         (for-template syntax-spec-dev)
          syntax/macro-testing)
 
 (syntax-spec
@@ -36,7 +34,7 @@
     #:binding (scope (bind x) e)
     (~> (e1 e2)
         ;; this is necessary to preserve source location, properties, etc.
-        (datum->syntax this-syntax (syntax-e #'(#%app e1 e2)) this-syntax this-syntax this-syntax))
+        (syntax/loc this-syntax (#%app e1 e2)))
     (#%app e1:lc-expr e2:lc-expr))
 
   (host-interface/expression
@@ -54,14 +52,16 @@
 ;;; runtime
 
 ;; An Env is a (ImmutableBoundIdTable Value)
-(define empty-env (make-immutable-bound-id-table))
+(define empty-env (immutable-symbol-table))
 ;; Env Identifier -> Value
 (define (env-lookup env x)
-  (bound-id-table-ref env x))
+  (symbol-table-ref env x))
 ;; Env Identifier Value -> Void
 (define (env-extend env x v)
-  (bound-id-table-set env x v))
-;; TODO ask michael if this makes any sense
+  (symbol-table-set env x v))
+;; this seems weird. not sure if this will work
+;; from michael:
+;; will work fine locally, will get weird if you have host expressions.
 
 ;; A Value is one of
 ;; a Number
